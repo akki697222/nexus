@@ -19,8 +19,8 @@ function system.panic(err, reason)
 end
 
 function system.createKernelThread(func, name, args)
-    if process.current ~= 0 then
-        return -1, "Permission Denied"
+    if process.current > 0 then
+        return "Permission Denied"
     end
     table.insert(kthreads, { co = wrap_with_traceback(func), args = args, name = name })
 end

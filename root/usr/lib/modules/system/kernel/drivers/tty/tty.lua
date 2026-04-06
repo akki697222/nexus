@@ -55,7 +55,7 @@ function tty_driver:init()
         vt = m.module
     end
     self.console.minor = self.id + 1
-    self.device = vt.new(self.console.minor, self)
+    self.device = vt.new(self.console.minor)
 end
 
 function tty_driver:read_pump(mask)
@@ -317,19 +317,14 @@ function tty.switch(id)
     if not dev then return end
     local proc = process.getCurrent()
     proc.tty = id
-    dev.device:save()
+    if dev.device then
+        dev.device.dirty = true
+    end
 end
-
-local prev_pid = -1
-local prev_tty_dev = nil
 
 function tty.getCurrent()
     local proc = process.getCurrent()
-    if proc and proc.pid == prev_pid and prev_tty_dev then
-        return prev_tty_dev
-    end
     local ttyid = proc and proc.tty or 0
-    prev_pid = proc and proc.pid or prev_pid
     return tty.get(ttyid)
 end
 

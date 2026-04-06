@@ -9,7 +9,6 @@ local component = require("component")
 ---@type system
 local system = require("system")
 
----@type vt_driver[]
 local vts = {}
 
 local ansi_colors = {
@@ -54,7 +53,8 @@ local vt_driver = {
     scscroll       = 0,
     line_positions = {},
     dirty          = false,
-    early          = true
+    early          = true,
+    updating       = false,
 }
 vt_driver.__index = vt_driver
 
@@ -299,7 +299,7 @@ function vt_driver:write(...)
     self.dirty = true
 
     if self.early then
-        --self:update()
+        self:update()
     end
 end
 
@@ -321,14 +321,13 @@ function vt_driver:scroll(n)
     self.dirty = true
 end
 
-local updating = false
 function vt_driver:update()
-    if not self.dirty or updating then return end
-    updating = true
+    if not self.dirty or self.updating then return end
+    self.updating = true
 
     local gpu = self.gpu
     if not gpu then
-        updating = false
+        self.updating = false
         return
     end
 
@@ -431,7 +430,7 @@ function vt_driver:update()
     end
 
     self.dirty = false
-    updating = false
+    self.updating = false
 end
 
 function vt_driver:backspace(n)
@@ -513,12 +512,17 @@ function vt.new(id)
     local dev = setmetatable({}, vt_driver)
     devfs.create("ttyv" .. tostring(id), dev)
     dev:init()
-    vts[id] = dev
+    table.insert(vts, {dev = dev, id = id})
     return dev
 end
 
 function vt.get(id)
-    return vts[id]
+    for _, drv in ipairs(vts) do
+        if drv.id == id then
+            return drv.dev
+        end
+    end
+    return nil
 end
 
 ---@type kernel_module
@@ -526,8 +530,8 @@ return {
     load = function()
         system.createKernelThread(function()
             while true do
-                for _, vt in ipairs(vts) do
-                    vt:update()
+                for _, drv in ipairs(vts) do
+                    drv.dev:update()
                     vt.early = false
                 end
                 coroutine.yield()
