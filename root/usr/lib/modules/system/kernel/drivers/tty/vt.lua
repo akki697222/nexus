@@ -532,7 +532,7 @@ return {
             while true do
                 for _, drv in ipairs(vts) do
                     drv.dev:update()
-                    vt.early = false
+                    drv.dev.early = false
                 end
                 coroutine.yield()
             end
