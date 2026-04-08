@@ -49,34 +49,40 @@ if not fs.exists("/etc/services") then
     fs.makeDirectory("/etc/services")
 end
 
-for sp in fs.list("/etc/services") do
-    print(sp)
-    local path = fs.concat("/etc/services", sp)
-    if fs.isDirectory(path) then
-        print(path .. " is a directory")
-    else
-        local f = loadfile(path, "bt") or function() end
-        local ok, s = pcall(f, path)
-        if ok and s and type(s) == "table" then
-            if s.title
-                and s.desc
-                and s.service then
-                status(0, "Starting " .. s.title .. " (" .. s.desc .. ")")
-                if s.service == "program" then
-                    if s.execpath and type(s.execpath) == "string" then
-                        proc.exec(s.execpath, s.args or {})
+local function searchAndStartServices(basePath)
+    for sp in fs.list(basePath) do
+        --print(sp)
+        local path = fs.concat(basePath, sp)
+        if fs.isDirectory(path) then
+            searchAndStartServices(path)
+        else
+            local f = loadfile(path, "bt") or function() end
+            local ok, s = pcall(f, path)
+            if ok and s and type(s) == "table" then
+                if s.title
+                    and s.desc
+                    and s.service then
+                    status(0, "Starting " .. s.title .. " (" .. s.desc .. ")")
+                    if s.service == "program" then
+                        if s.execpath and type(s.execpath) == "string" then
+                            proc.exec(s.execpath, s.args or {})
+                        else
+                            status(2, "Invalid exec path '" .. tostring(s.execpath) .. "'")
+                        end
                     else
-                        status(2, "Invalid exec path '" .. tostring(s.execpath) .. "'")
+                        status(2, "Invalid service type '" .. s.service .. "'")
                     end
                 end
+            elseif not ok then
+                status(2, "Failed to start service: " .. s)
+            else
+                print("not a module")
             end
-        elseif not ok then
-            status(2, "Failed to start service: " .. s)
-        else
-            print("not a module")
         end
     end
 end
+
+searchAndStartServices("/etc/services")
 
 -- Init end
 print("Welcome to " .. _OSDIST .. " (" .. _OSVERSION .. ")")
