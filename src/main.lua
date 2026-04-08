@@ -134,7 +134,7 @@ printk("Booting " .. _OSVERSION)
 
 local init_path = nil
 if #kargs ~= 0 then
-    for index, value in ipairs(kargs) do
+    for _, value in ipairs(kargs) do
         if type(value) == "string" then
             local match = string.match(value, "^init=(.*)")
             if match then
@@ -152,7 +152,7 @@ local pid, e = process.exec(init_path, { _OSVERSION }, 0, util.createEnv(), 1)
 if pid == -1 then
     panic("not syncing", "Failed to start init process: " .. e)
 end
----@param proc process_entry
+
 -- kernel main event loop
 while true do
     local ev = table.pack(computer.pullSignal(0.05))
@@ -160,6 +160,7 @@ while true do
         event.dispatch(ev)
     end
 
+    -- kthreads処理
     local tremoves = {}
     for i, thr in ipairs(kthreads) do
         if coroutine.status(thr.co) ~= "dead" then
@@ -175,25 +176,34 @@ while true do
         table.remove(kthreads, i)
     end
 
-    -- Resume all processes and collect indices of dead processes
+    if ev.n > 0 then
+        process.dispatchWaiting(ev)
+    end
+
+    local run_queue = process.getRunQueue()
     local premoves = {}
-    for i, proc in ipairs(processes) do
-        local rm = process.resume(proc, ev)
-        if rm then
-            table.insert(premoves, i)
+    local snapshot = {}
+    for _, proc in ipairs(run_queue) do
+        table.insert(snapshot, proc)
+    end
+
+    for _, proc in ipairs(snapshot) do
+        if process.get(proc.pid) then
+            local dead = process.resume(proc, ev)
+            if dead then
+                table.insert(premoves, proc.pid)
+            end
         end
     end
 
-    -- Remove dead processes in reverse order to avoid index shifting issues
-    table.sort(premoves, function(a, b) return a > b end)
-    for _, i in ipairs(premoves) do
-        local p = processes[i]
-        table.remove(processes, i)
-        event.removeQueue(p.pid)
-        used_pids[p.pid] = nil
+    for _, pid in ipairs(premoves) do
+        local proc = process.get(pid)
+        if proc then
+            process.kill(pid)
+        end
     end
+
     if not process.get(1) then
         panic("not syncing", "Attempted to kill init!")
     end
-    fbcon.update()
 end

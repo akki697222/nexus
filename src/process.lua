@@ -6,6 +6,35 @@ processes = {}
 local used_pids = {}
 process.current = -1
 
+local run_queue     = {}
+local wait_queue    = {}
+local suspend_queue = {}
+
+local function sort_run_queue()
+    table.sort(run_queue, function(a, b)
+        return (a.nice or 3) < (b.nice or 3)
+    end)
+end
+
+local function enqueue(queue, proc)
+    table.insert(queue, proc)
+end
+
+local function dequeue(queue, pid)
+    for i, p in ipairs(queue) do
+        if p.pid == pid then
+            table.remove(queue, i)
+            return p
+        end
+    end
+    return nil
+end
+
+local function enqueue_run(proc)
+    enqueue(run_queue, proc)
+    sort_run_queue()
+end
+
 ---@type util
 util = util
 
@@ -14,37 +43,37 @@ local event
 
 ---@type signal
 signals = {
-    SIGHUP    = 1,  -- Hangup detected on controlling terminal or death of controlling process
-    SIGINT    = 2,  -- Interrupt from keyboard (Ctrl+C)
-    SIGQUIT   = 3,  -- Quit from keyboard
-    SIGILL    = 4,  -- Illegal Instruction
-    SIGTRAP   = 5,  -- Trace/breakpoint trap
-    SIGABRT   = 6,  -- Abort signal from abort(3)
-    SIGBUS    = 7,  -- Bus error (bad memory access)
-    SIGFPE    = 8,  -- Floating point exception
-    SIGKILL   = 9,  -- Kill signal (cannot be caught or ignored)
-    SIGUSR1   = 10, -- User-defined signal 1
-    SIGSEGV   = 11, -- Invalid memory reference
-    SIGUSR2   = 12, -- User-defined signal 2
-    SIGPIPE   = 13, -- Broken pipe: write to pipe with no readers
-    SIGALRM   = 14, -- Timer signal from alarm(2)
-    SIGTERM   = 15, -- Termination signal
-    SIGSTKFLT = 16, -- Stack fault on coprocessor (obsolete)
-    SIGCHLD   = 17, -- Child stopped or terminated
-    SIGCONT   = 18, -- Continue if stopped
-    SIGSTOP   = 19, -- Stop process (cannot be caught or ignored)
-    SIGTSTP   = 20, -- Stop typed at tty (Ctrl+Z)
-    SIGTTIN   = 21, -- tty input for background process
-    SIGTTOU   = 22, -- tty output for background process
-    SIGURG    = 23, -- Urgent condition on socket
-    SIGXCPU   = 24, -- CPU time limit exceeded
-    SIGXFSZ   = 25, -- File size limit exceeded
-    SIGVTALRM = 26, -- Virtual alarm clock
-    SIGPROF   = 27, -- Profiling timer expired
-    SIGWINCH  = 28, -- Window resize signal
-    SIGIO     = 29, -- I/O now possible
-    SIGPWR    = 30, -- Power failure (System V)
-    SIGSYS    = 31, -- Bad system call (SVr4)
+    SIGHUP    = 1,
+    SIGINT    = 2,
+    SIGQUIT   = 3,
+    SIGILL    = 4,
+    SIGTRAP   = 5,
+    SIGABRT   = 6,
+    SIGBUS    = 7,
+    SIGFPE    = 8,
+    SIGKILL   = 9,
+    SIGUSR1   = 10,
+    SIGSEGV   = 11,
+    SIGUSR2   = 12,
+    SIGPIPE   = 13,
+    SIGALRM   = 14,
+    SIGTERM   = 15,
+    SIGSTKFLT = 16,
+    SIGCHLD   = 17,
+    SIGCONT   = 18,
+    SIGSTOP   = 19,
+    SIGTSTP   = 20,
+    SIGTTIN   = 21,
+    SIGTTOU   = 22,
+    SIGURG    = 23,
+    SIGXCPU   = 24,
+    SIGXFSZ   = 25,
+    SIGVTALRM = 26,
+    SIGPROF   = 27,
+    SIGWINCH  = 28,
+    SIGIO     = 29,
+    SIGPWR    = 30,
+    SIGSYS    = 31,
 }
 
 ---@class process_entry
@@ -78,7 +107,7 @@ signals = {
 local function wrap_with_traceback(func, proc)
     return coroutine.create(function(...)
         local function err_handler(err)
-            return debug.traceback(err, 2)
+            return debug.traceback(err)
         end
         local ok, result = xpcall(func, err_handler, ...)
         if not ok then
@@ -116,7 +145,7 @@ end
 
 function process.getCurrent()
     if process.current == -1 then return nil end
-    for index, value in ipairs(processes) do
+    for _, value in ipairs(processes) do
         if value.pid == process.current then
             return value
         end
@@ -137,7 +166,7 @@ function process.getParentPID()
 end
 
 ---@param k string?
----@return string|table|nil # when k==nil but process exists, returning current environ table
+---@return string|table|nil
 function process.getEnviron(k)
     local proc = process.getCurrent()
     if not proc then return nil end
@@ -150,7 +179,6 @@ end
 function process.setEnviron(k, v)
     local proc = process.getCurrent()
     if proc then
-        -- printk("setenv: pid " .. proc.pid .. " " .. tostring(k) .. "=" .. tostring(v))
         proc.environ[k] = v
     end
 end
@@ -249,64 +277,88 @@ function process.exec(path, args, nice, env, pid, uid, gid)
     }
 
     table.insert(processes, entry)
+    enqueue_run(entry)
 
     return pid
 end
 
 function process.wait(pid)
+    local proc = process.getCurrent()
+    if proc then
+        dequeue(run_queue, proc.pid)
+        proc.status = "waiting"
+        enqueue(wait_queue, proc)
+    end
+
     while true do
-        local proc = process.get(pid)
-        if proc == nil or proc.status == "dead" then
+        local target = process.get(pid)
+        if target == nil or target.status == "dead" then
+            if proc then
+                dequeue(wait_queue, proc.pid)
+                proc.status = "running"
+                enqueue_run(proc)
+            end
             break
-        elseif proc ~= nil and proc.err then
-            return proc.err
+        elseif target ~= nil and target.err then
+            if proc then
+                dequeue(wait_queue, proc.pid)
+                proc.status = "running"
+                enqueue_run(proc)
+            end
+            return target.err
         end
         coroutine.yield("__event_wait__")
     end
 end
 
 function process.exit(code)
-    -- code is ignored for now
     process.kill(process.current)
 end
 
 function process.kill(pid)
-    local idx = -1
-    for index, value in ipairs(processes) do
-        if value.pid == pid then
-            idx = index
+    local proc = process.get(pid)
+    if not proc then
+        return false, "No such process"
+    end
+
+    dequeue(run_queue, pid)
+    dequeue(wait_queue, pid)
+    dequeue(suspend_queue, pid)
+
+    for i, p in ipairs(processes) do
+        if p.pid == pid then
+            table.remove(processes, i)
             break
         end
     end
-    if idx ~= -1 then
-        table.remove(processes, idx)
-        event.removeQueue(pid)
-        used_pids[pid] = nil
-        return true
-    else
-        return false, "No such process"
-    end
+
+    event.removeQueue(pid)
+    used_pids[pid] = nil
+    return true
 end
 
 function process.suspend(pid)
     local proc = process.get(pid)
-    if proc then
-        proc.status = "suspended"
-        return true
-    end
-    return false, "No such process"
+    if not proc then return false, "No such process" end
+
+    dequeue(run_queue, pid)
+    dequeue(wait_queue, pid)
+    proc.status = "suspended"
+    enqueue(suspend_queue, proc)
+    return true
 end
 
 function process.resume_handle(pid)
     local proc = process.get(pid)
-    if proc then
-        if proc.status == "suspended" then
-            proc.status = "running"
-            return true
-        end
+    if not proc then return false, "No such process" end
+    if proc.status ~= "suspended" then
         return false, "Process is not suspended"
     end
-    return false, "No such process"
+
+    dequeue(suspend_queue, pid)
+    proc.status = "running"
+    enqueue_run(proc)
+    return true
 end
 
 function process.createThread(func, name, ...)
@@ -342,6 +394,7 @@ function process.createThread(func, name, ...)
     }
 
     table.insert(processes, thread_entry)
+    enqueue_run(thread_entry)
     return tid
 end
 
@@ -351,15 +404,17 @@ local function process_signals(proc, proc_idx)
     for sig, handler in pairs(proc.sig_handlers) do
         handlers[tostring(sig)] = handler
     end
-    for index, value in ipairs(proc.signals) do
+    for _, value in ipairs(proc.signals) do
         if value == 19 or value == 9 then
-            table.remove(processes, proc_idx)
+            process.kill(proc.pid)
+            return
         end
         local handle = handlers[tostring(value)]
         if type(handle) == "function" then
             handle()
         end
     end
+    proc.signals = {}
 end
 
 ---@param signal integer
@@ -376,36 +431,27 @@ end
 function process.cwd(path, parent)
     local proc = parent or process.getCurrent()
     if not proc then return end
-    --printk("cwd: current: " .. (vfs.realPath(proc.cwd) or "nil"))
     if not path or path == "" then
         return vfs.realPath(proc.cwd)
-    end --fallback
+    end
     local vnode = vfs.attributes(path)
     proc.cwd = vnode or vfs.root()
     local real = vfs.realPath(proc.cwd)
     proc.environ.PWD = real
-    --printk("cwd: updated: " .. (vfs.realPath(proc.cwd) or "nil"))
     return real
 end
 
 ---@param proc process_entry
+---@param ev table
+---@return boolean dead
 function process.resume(proc, ev)
     if proc.status == "suspended" then return false end
     if proc.status == "dead" then return true end
 
     process.current = proc.pid
 
-    -- Check if process actually needs an event
     if proc.status == "waiting" and (not ev or ev.n == 0) then
         return false
-    end
-
-    local index = -1
-    for i, value in ipairs(processes) do
-        if value.pid == proc.pid then
-            index = i
-            break
-        end
     end
 
     if coroutine.status(proc.thread) == "dead" then
@@ -413,9 +459,16 @@ function process.resume(proc, ev)
         return true
     end
 
-    process_signals(proc, index)
+    local idx = -1
+    for i, p in ipairs(processes) do
+        if p.pid == proc.pid then idx = i; break end
+    end
+    if idx ~= -1 then
+        process_signals(proc, idx)
+    end
 
-    -- Prepare resume arguments
+    if not process.get(proc.pid) then return true end
+
     local args = proc.arguments
     if proc.status == "waiting" and ev and ev.n > 0 then
         args = ev
@@ -429,12 +482,28 @@ function process.resume(proc, ev)
     end
 
     if ret == "__event_wait__" then
+        dequeue(run_queue, proc.pid)
         proc.status = "waiting"
+        enqueue(wait_queue, proc)
     else
         proc.status = "running"
     end
 
     return false
+end
+
+function process.dispatchWaiting(ev)
+    local to_run = {}
+    for _, proc in ipairs(wait_queue) do
+        if ev and ev.n > 0 then
+            table.insert(to_run, proc)
+        end
+    end
+    for _, proc in ipairs(to_run) do
+        dequeue(wait_queue, proc.pid)
+        proc.status = "running"
+        enqueue_run(proc)
+    end
 end
 
 ---@return process_entry[]
@@ -456,11 +525,13 @@ end
 
 ---@return process_entry|nil
 function process.get(pid)
-    for index, value in ipairs(processes) do
+    for _, value in ipairs(processes) do
         if value.pid == pid then
             return value
         end
     end
 end
 
--- OpenOS APIs
+function process.getRunQueue()
+    return run_queue
+end
