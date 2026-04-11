@@ -264,33 +264,9 @@ function vfs.attributes(path)
     local relative_parts = {}
 
     for i, name in ipairs(parts) do
-        -- シンボリックリンク解決
-        while current.type == "VLNK" and current.link do
-            local link_path
-            if type(current.link) == "string" then
-                link_path = current.link
-            else
-                link_path = vfs.realPath(current.link)
-            end
-
-            local rest_parts = {}
-            for j = i, #parts do table.insert(rest_parts, parts[j]) end
-            local rest_path = table.concat(rest_parts, "/")
-
-            local new_path
-            if link_path:sub(1, 1) == "/" then
-                new_path = vfs.canonical(vfs.concat(link_path, rest_path))
-            else
-                local base_path = vfs.realPath(current.parent) or "/"
-                new_path = vfs.canonical(vfs.concat(base_path, link_path, rest_path))
-            end
-            return vfs.attributes(new_path)
-        end
-
         local name_hash = fnv1a_hash(name)
         local next_node = current.children[name_hash]
 
-        -- ハッシュで見つからない場合は名前で線形探索
         if not next_node then
             for _, node in pairs(current.children) do
                 if node.name == name then
@@ -299,7 +275,6 @@ function vfs.attributes(path)
             end
         end
 
-        -- キャッシュにない場合はFSに問い合わせて動的生成（遅延生成）
         if not next_node then
             local parent_fs = current.fs or (mount_node and mount_node.fs)
             if parent_fs then
@@ -319,13 +294,34 @@ function vfs.attributes(path)
                         current,
                         parent_fs
                     )
-                    -- ディレクトリなら.metaを読んでパーミッション等を復元
                     if isDir then
                         loadDirMetadata(child_fs_path, next_node, parent_fs)
                     end
                 end
             end
             if not next_node then return nil, nil, nil end
+        end
+
+        if next_node.type == "VLNK" and next_node.link then
+            local link_path
+            if type(next_node.link) == "string" then
+                link_path = next_node.link
+            else
+                link_path = vfs.realPath(next_node.link)
+            end
+
+            local rest_parts = {}
+            for j = i + 1, #parts do
+                table.insert(rest_parts, parts[j])
+            end
+
+            local new_path
+            if #rest_parts > 0 then
+                new_path = vfs.canonical(link_path .. "/" .. table.concat(rest_parts, "/"))
+            else
+                new_path = vfs.canonical(link_path)
+            end
+            return vfs.attributes(new_path)
         end
 
         current = next_node
@@ -471,9 +467,9 @@ function vfs.mount(fs, path)
         parent = vfs.attributes(vfs.path(path))
     end
     vnode = createVNode(vfs.name(path), "VDIR", parent, fs)
-    if path == "/" then 
-        vtab[vfs_root_hash] = vnode 
-        vfs_root = vnode 
+    if path == "/" then
+        vtab[vfs_root_hash] = vnode
+        vfs_root = vnode
     end
     return true
 end

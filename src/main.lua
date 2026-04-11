@@ -166,14 +166,32 @@ if pid == -1 then
     panic("not syncing", "Failed to start init process: " .. e)
 end
 
--- kernel main event loop
-while true do
-    local ev = table.pack(computer.pullSignal(0.05))
-    if ev.n > 0 then
-        event.dispatch(ev)
+runProcessQueue = function(event)
+    local run_queue = process.getRunQueue()
+    local premoves = {}
+    local snapshot = {}
+    for _, proc in ipairs(run_queue) do
+        table.insert(snapshot, proc)
     end
 
-    -- kthreads処理
+    for _, proc in ipairs(snapshot) do
+        if process.get(proc.pid) then
+            local dead = process.resume(proc, event)
+            if dead then
+                table.insert(premoves, proc.pid)
+            end
+        end
+    end
+
+    for _, pid in ipairs(premoves) do
+        local proc = process.get(pid)
+        if proc then
+            process.kill(pid)
+        end
+    end
+end
+
+resumeKernelThreads = function()
     local tremoves = {}
     for i, thr in ipairs(kthreads) do
         if coroutine.status(thr.co) ~= "dead" then
@@ -188,33 +206,22 @@ while true do
     for _, i in ipairs(tremoves) do
         table.remove(kthreads, i)
     end
+end
+
+-- kernel main event loop
+while true do
+    local ev = table.pack(computer.pullSignal(0.05))
+    if ev.n > 0 then
+        event.dispatch(ev)
+    end
+
+    resumeKernelThreads()
 
     if ev.n > 0 then
         process.dispatchWaiting(ev)
     end
 
-    local run_queue = process.getRunQueue()
-    local premoves = {}
-    local snapshot = {}
-    for _, proc in ipairs(run_queue) do
-        table.insert(snapshot, proc)
-    end
-
-    for _, proc in ipairs(snapshot) do
-        if process.get(proc.pid) then
-            local dead = process.resume(proc, ev)
-            if dead then
-                table.insert(premoves, proc.pid)
-            end
-        end
-    end
-
-    for _, pid in ipairs(premoves) do
-        local proc = process.get(pid)
-        if proc then
-            process.kill(pid)
-        end
-    end
+    runProcessQueue(ev)
 
     if not process.get(1) then
         panic("not syncing", "Attempted to kill init!")

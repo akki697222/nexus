@@ -2,6 +2,8 @@
 process = {}
 ---@type process_entry[]
 processes = {}
+---@type table<integer, process_entry>
+local process_map = setmetatable({}, { __mode = "v" })
 ---@type table<integer, boolean>
 local used_pids = {}
 process.current = -1
@@ -106,10 +108,7 @@ signals = {
 ---@return thread
 local function wrap_with_traceback(func, proc)
     return coroutine.create(function(...)
-        local function err_handler(err)
-            return debug.traceback(err)
-        end
-        local ok, result = xpcall(func, err_handler, ...)
+        local ok, result = xpcall(func, debug.traceback, ...)
         if not ok then
             if proc then
                 proc.err = result
@@ -277,6 +276,7 @@ function process.exec(path, args, nice, env, pid, uid, gid)
     }
 
     table.insert(processes, entry)
+    process_map[pid] = entry
     enqueue_run(entry)
 
     return pid
@@ -476,7 +476,7 @@ function process.resume(proc, ev)
 
     local ok, ret = coroutine.resume(proc.thread, table.unpack(args))
     if not ok then
-        printk("Process " .. proc.pid .. " Exited on error: " .. ret)
+        printk("Process " .. proc.pid .. " Exited on error: " .. tostring(ret))
         proc.status = "dead"
         return true
     end
@@ -525,11 +525,7 @@ end
 
 ---@return process_entry|nil
 function process.get(pid)
-    for _, value in ipairs(processes) do
-        if value.pid == pid then
-            return value
-        end
-    end
+    return process_map[pid]
 end
 
 function process.getRunQueue()

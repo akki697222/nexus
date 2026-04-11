@@ -1,4 +1,6 @@
 local vfs
+local runProcessQueue
+local resumeKernelThreads
 
 ---@class fbcon : console_device
 local fbcon = {
@@ -147,6 +149,9 @@ panic = function(err, reason)
         for _ = 0, 2 do
             computer.beep()
         end
+        -- resume kthreads and processes once to force update screen
+        runProcessQueue({})
+        resumeKernelThreads()
         while true do
             computer.pullSignal()
         end

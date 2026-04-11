@@ -105,6 +105,10 @@ if not os.getenv("HOSTNAME") then
 end
 
 while true do
-    local pid = process.exec("/sbin/login.lua")
+    local pid, err = process.exec("/sbin/login.lua")
+    if pid == -1 and err then
+        io.stderr:write("init: failed to start login: " .. err .. "\n")
+        break
+    end
     process.wait(pid)
 end
