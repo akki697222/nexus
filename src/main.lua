@@ -109,6 +109,19 @@ for path in vfs.list("/usr/bin") do
     vfs.chmod(vfs.concat("/usr/bin", path), 0755)
 end
 
+system.createKernelThread(function()
+    local SAVE_INTERVAL = 1
+    local last_save = computer.uptime()
+    while true do
+        if vfs._dirty and computer.uptime() - last_save >= SAVE_INTERVAL then
+            vfs.saveMetadata()
+            vfs._dirty = false
+            last_save = computer.uptime()
+        end
+        coroutine.yield()
+    end
+end, "vfs_sync", {})
+
 devfs.init()
 user.init()
 group.init()

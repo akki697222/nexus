@@ -6,6 +6,7 @@ local vtab = setmetatable({}, { __mode = "v" })
 local vhandles = {}
 ---@type devfs
 local devfs
+local vfs_root = nil
 
 ---@class vnode
 ---@field name string
@@ -185,7 +186,7 @@ end
 
 ---@return vnode
 function vfs.root()
-    return vtab[vfs_root_hash]
+    return vfs_root
 end
 
 -- .metaファイルからディレクトリのメタデータを読み込む
@@ -251,7 +252,7 @@ end
 ---@return string|nil
 ---@return vnode|nil
 function vfs.attributes(path)
-    local current = vtab[vfs_root_hash]
+    local current = vfs_root
     if not current then return nil, nil, nil end
     if path == "/" then return current, nil, current end
 
@@ -470,8 +471,10 @@ function vfs.mount(fs, path)
         parent = vfs.attributes(vfs.path(path))
     end
     vnode = createVNode(vfs.name(path), "VDIR", parent, fs)
-    if path == "/" then vtab[vfs_root_hash] = vnode end
-    -- lookupFilesystem を呼ばない → 遅延生成に任せる
+    if path == "/" then 
+        vtab[vfs_root_hash] = vnode 
+        vfs_root = vnode 
+    end
     return true
 end
 
@@ -496,7 +499,7 @@ function vfs.mounts()
             end
         end
     end
-    local root = vtab[vfs_root_hash]
+    local root = vfs_root
     if root then collect_mounts(root) end
     local i, n = 0, #mounts
     return function()
@@ -571,7 +574,7 @@ function vfs.link(target, linkpath)
         gid      = 0,
         link     = targetNode,
     }
-    vfs.saveMetadata()
+    vfs._dirty = true
     return true
 end
 
@@ -709,7 +712,7 @@ function vfs.makeDirectory(path)
     local s, e = mp.fs.makeDirectory(full_rest)
     if s then
         createVNode(vfs.name(path), "VDIR", parent_vnode, mp.fs)
-        vfs.saveMetadata()
+        vfs._dirty = true
         return true
     end
     return false, e
@@ -749,7 +752,7 @@ function vfs.remove(path)
     local ps, pe = premove()
     s            = s or ps
     e            = pe or e
-    if s then vfs.saveMetadata() end
+    if s then vfs._dirty = true end
     return s, e
 end
 
@@ -874,7 +877,7 @@ function vfs.chmod(path, mode)
     if not canModify then return nil, "Permission denied" end
 
     vnode.mode = mode
-    vfs.saveMetadata()
+    vfs._dirty = true
 end
 
 ---@param path string
@@ -899,7 +902,7 @@ function vfs.chown(path, uid, gid)
 
     vnode.uid = uid
     vnode.gid = gid
-    vfs.saveMetadata()
+    vfs._dirty = true
 end
 
 local function writeMeta(dirPath, children, fs)
@@ -954,8 +957,7 @@ function vfs.saveMetadata()
         end
     end
 
-    local root = vtab[vfs_root_hash]
-    if root then saveDir(root) end
+    if vfs_root then saveDir(vfs_root) end
     return true
 end
 
