@@ -1019,7 +1019,7 @@ loadfile = function(filename, mode, env)
     local file, err = vfs.open(filename, "r")
     if not file then return nil, err end
 
-    local chunks = {}
+    local chunks = ""
     local buffer_size = 8192 
 
     while true do
@@ -1033,15 +1033,11 @@ loadfile = function(filename, mode, env)
             break
         end
         
-        table.insert(chunks, data)
+        chunks = chunks .. data
     end
     file:close()
 
-    local buffer = table.concat(chunks)
-    
-    chunks = nil 
-
-    local chunk, load_err = load(buffer, "=" .. filename, mode or "bt", env or (util and util.createEnv() or _G))
+    local chunk, load_err = load(chunks, "=" .. filename, mode or "bt", env or (util and util.createEnv() or _G))
     if not chunk then return nil, load_err end
     return chunk
 end
