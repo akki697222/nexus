@@ -1,12 +1,11 @@
 ---@class vfs : openos_fs
 vfs = {}
 ---@type table<integer, vnode>
-local vtab = setmetatable({}, { __mode = "v" })
+local vtab = {}
 ---@type table<string, vfs_descriptor>
 local vhandles = {}
 ---@type devfs
 local devfs
-local vfs_root = nil
 
 ---@class vnode
 ---@field name string
@@ -74,8 +73,7 @@ local function createVNode(name, vtype, parent, fs, perm)
         hash     = hash,
         type     = vtype,
         parent   = parent,
-        -- 弱参照テーブルでchildrenを管理 → GCが未参照vnodeを自動回収
-        children = setmetatable({}, { __mode = "v" }),
+        children = {},
         fs       = fs,
         link     = nil,
         mtime    = os.time(),
@@ -154,11 +152,13 @@ function vfs.can(path, action)
 
     if proc.euid == 0 then return true end
 
+    -- ルートの実行権限確認
     local rootNode = vfs.attributes("/")
     if not rootNode or not checkPerms(rootNode, proc, "x") then
         return false
     end
 
+    -- 各親ディレクトリの実行権限確認
     local parts     = vfs.segments(path)
     local checkPath = "/"
     for i = 1, #parts - 1 do
@@ -168,6 +168,7 @@ function vfs.can(path, action)
         if not checkPerms(node, proc, "x") then return false end
     end
 
+    -- ターゲット自身の権限確認
     local vnode = vfs.attributes(path)
     if not vnode then return false end
     return checkPerms(vnode, proc, action)
@@ -186,65 +187,7 @@ end
 
 ---@return vnode
 function vfs.root()
-    return vfs_root
-end
-
--- .metaファイルからディレクトリのメタデータを読み込む
--- attributes()内でディレクトリvnode生成時に呼ばれる
-local function loadDirMetadata(path, parent, fs)
-    local metaPath = (path == "/" and "" or path) .. "/.meta"
-    if not fs.exists(metaPath) then return end
-
-    local handle = fs.open(metaPath, "r")
-    if not handle then return end
-
-    local buffer = ""
-    repeat
-        local data = fs.read(handle, 1024)
-        if data then buffer = buffer .. data end
-    until not data
-    fs.close(handle)
-
-    for line in string.gmatch(buffer, "[^\r\n]+") do
-        local name, vtype, hash, mtime, btime, mode, refcount, uid, gid, link =
-            string.match(line, "^([^:]+):([^:]+):(%d+):(%d+):(%d+):(%d+):(%d+):(%d+):(%d+):?(.*)")
-
-        if name then
-            local name_hash = fnv1a_hash(name)
-            local child     = parent.children[name_hash]
-
-            if not child then
-                if vtype == "VLNK" then
-                    child = {
-                        name     = name,
-                        hash     = name_hash,
-                        type     = vtype,
-                        parent   = parent,
-                        children = setmetatable({}, { __mode = "v" }),
-                        fs       = fs,
-                        link     = (link ~= "" and link or nil),
-                        mtime    = tonumber(mtime),
-                        btime    = tonumber(btime),
-                        refcount = tonumber(refcount),
-                        mode     = tonumber(mode),
-                        uid      = tonumber(uid),
-                        gid      = tonumber(gid),
-                    }
-                    parent.children[name_hash] = child
-                end
-            else
-                child.mtime    = tonumber(mtime)
-                child.btime    = tonumber(btime)
-                child.mode     = tonumber(mode)
-                child.refcount = tonumber(refcount)
-                child.uid      = tonumber(uid)
-                child.gid      = tonumber(gid)
-                if vtype == "VLNK" and link and link ~= "" then
-                    child.link = link
-                end
-            end
-        end
-    end
+    return vtab[vfs_root_hash]
 end
 
 ---@param path string
@@ -252,78 +195,51 @@ end
 ---@return string|nil
 ---@return vnode|nil
 function vfs.attributes(path)
-    local current = vfs_root
+    local current = vtab[vfs_root_hash]
     if not current then return nil, nil, nil end
     if path == "/" then return current, nil, current end
 
-    path = vfs.resolve(path)
-    local norm_path = vfs.canonical(path)
-    local parts = vfs.segments(norm_path)
+    path                 = vfs.resolve(path)
+    local norm_path      = vfs.canonical(path)
+    local parts          = vfs.segments(norm_path)
 
-    local mount_node = current
+    local mount_node     = current
     local relative_parts = {}
 
     for i, name in ipairs(parts) do
+        -- シンボリックリンク解決
+        while current.type == "VLNK" and current.link do
+            local link_path
+            if type(current.link) == "string" then
+                link_path = current.link
+            else
+                link_path = vfs.realPath(current.link)
+            end
+
+            local rest_parts = {}
+            for j = i, #parts do table.insert(rest_parts, parts[j]) end
+            local rest_path = table.concat(rest_parts, "/")
+
+            local new_path
+            if link_path:sub(1, 1) == "/" then
+                new_path = vfs.canonical(vfs.concat(link_path, rest_path))
+            else
+                local base_path = vfs.realPath(current.parent) or "/"
+                new_path = vfs.canonical(vfs.concat(base_path, link_path, rest_path))
+            end
+            return vfs.attributes(new_path)
+        end
+
         local name_hash = fnv1a_hash(name)
         local next_node = current.children[name_hash]
-
         if not next_node then
             for _, node in pairs(current.children) do
                 if node.name == name then
                     next_node = node; break
                 end
             end
-        end
-
-        if not next_node then
-            local parent_fs = current.fs or (mount_node and mount_node.fs)
-            if parent_fs then
-                local fs_path = getFsRelativePath(current)
-                local child_fs_path
-                if fs_path == "/" then
-                    child_fs_path = "/" .. name
-                else
-                    child_fs_path = fs_path .. "/" .. name
-                end
-
-                if parent_fs.exists(child_fs_path) then
-                    local isDir = parent_fs.isDirectory(child_fs_path)
-                    next_node = createVNode(
-                        name,
-                        isDir and "VDIR" or "VREG",
-                        current,
-                        parent_fs
-                    )
-                    if isDir then
-                        loadDirMetadata(child_fs_path, next_node, parent_fs)
-                    end
-                end
-            end
             if not next_node then return nil, nil, nil end
         end
-
-        if next_node.type == "VLNK" and next_node.link then
-            local link_path
-            if type(next_node.link) == "string" then
-                link_path = next_node.link
-            else
-                link_path = vfs.realPath(next_node.link)
-            end
-
-            local rest_parts = {}
-            for j = i + 1, #parts do
-                table.insert(rest_parts, parts[j])
-            end
-
-            local new_path
-            if #rest_parts > 0 then
-                new_path = vfs.canonical(link_path .. "/" .. table.concat(rest_parts, "/"))
-            else
-                new_path = vfs.canonical(link_path)
-            end
-            return vfs.attributes(new_path)
-        end
-
         current = next_node
 
         if current.fs then
@@ -467,10 +383,8 @@ function vfs.mount(fs, path)
         parent = vfs.attributes(vfs.path(path))
     end
     vnode = createVNode(vfs.name(path), "VDIR", parent, fs)
-    if path == "/" then
-        vtab[vfs_root_hash] = vnode
-        vfs_root = vnode
-    end
+    if path == "/" then vtab[vfs_root_hash] = vnode end
+    vfs.lookupFilesystem(path, fs)
     return true
 end
 
@@ -495,7 +409,7 @@ function vfs.mounts()
             end
         end
     end
-    local root = vfs_root
+    local root = vtab[vfs_root_hash]
     if root then collect_mounts(root) end
     local i, n = 0, #mounts
     return function()
@@ -564,13 +478,13 @@ function vfs.link(target, linkpath)
         mtime    = getRealTime(),
         btime    = getRealTime(),
         mode     = 0777,
-        children = setmetatable({}, { __mode = "v" }),
+        children = {},
         refcount = 1,
         uid      = 0,
         gid      = 0,
         link     = targetNode,
     }
-    vfs._dirty = true
+    vfs.saveMetadata()
     return true
 end
 
@@ -615,6 +529,7 @@ end
 ---@param path string
 ---@return integer
 function vfs.size(path)
+    -- FIX: getFsRelativePath でFS相対パスを使う (旧: rest変数 = VFS相対パスで不正確)
     local vnode = vfs.attributes(path)
     if vnode and vnode.fs then
         return vnode.fs.size(getFsRelativePath(vnode))
@@ -641,6 +556,7 @@ end
 ---@param path string
 ---@return integer
 function vfs.lastModified(path)
+    -- FIX: getFsRelativePath でFS相対パスを使う
     local vnode = vfs.attributes(path)
     if vnode and vnode.fs then
         return vnode.fs.lastModified(getFsRelativePath(vnode))
@@ -653,35 +569,24 @@ end
 ---@return string|nil
 function vfs.list(path)
     path = vfs.resolve(path)
-    local vnode, _, mp = vfs.attributes(path)
+    local vnode, rest, mp = vfs.attributes(path)
     if not vnode or not mp then return nil, "No such file or directory" end
 
-    -- シンボリックリンクを解決
     if vnode.type == "VLNK" then
-        if not vnode.link then return nil, "Invalid link" end
+        if not vnode.link then error("Invalid link") end
         if type(vnode.link) == "string" then
             vnode = vfs.attributes(vnode.link)
-            if not vnode then return nil, "Broken link" end
+            if not vnode then error("Broken link") end
         else
             vnode = vnode.link
         end
     end
 
-    -- FSに直接問い合わせてリストを取得（childrenキャッシュに依存しない）
-    local fs_path = getFsRelativePath(vnode)
-    local entries = mp.fs.list(fs_path)
-    if not entries then return nil, "No such file or directory" end
-
     local list = {}
-    for _, name in ipairs(entries) do
-        -- 末尾スラッシュを除去し.metaを除外
-        name = name:gsub("/*$", "")
-        if name ~= ".meta" and name ~= "" then
-            table.insert(list, name)
-        end
+    for _, node in pairs(vnode.children) do
+        table.insert(list, node.name)
     end
     table.sort(list)
-
     local i = 0
     return function()
         i = i + 1
@@ -698,6 +603,9 @@ function vfs.makeDirectory(path)
     if vfs.exists(path) or not (parent_vnode and mp) then
         return false, "File exists"
     end
+    -- FIX: getFsRelativePath で親のFS相対パスを取得してから dirname を結合する
+    --      旧コードの rest は /tmp/foo → tmp/foo の相対パスなので tmpfs では動くが
+    --      マウントポイントが深い場合に誤ったパスを渡す可能性があった
     local parent_fs_path = getFsRelativePath(parent_vnode)
     local full_rest
     if parent_fs_path == "/" then
@@ -708,7 +616,7 @@ function vfs.makeDirectory(path)
     local s, e = mp.fs.makeDirectory(full_rest)
     if s then
         createVNode(vfs.name(path), "VDIR", parent_vnode, mp.fs)
-        vfs._dirty = true
+        vfs.saveMetadata()
         return true
     end
     return false, e
@@ -748,7 +656,7 @@ function vfs.remove(path)
     local ps, pe = premove()
     s            = s or ps
     e            = pe or e
-    if s then vfs._dirty = true end
+    if s then vfs.saveMetadata() end
     return s, e
 end
 
@@ -813,19 +721,19 @@ function vfs.open(path, mode)
     end
 
     function file:readAll()
-        -- use string to reduce memory usage (tables and table.concat uses additional memories)
-        local chunks = ""
+        local content = ""
         while true do
-            local chunk, err = self.fs.read(self.handle, 8192)
+            local chunk, err = self.fs.read(self.handle, 1024)
             if not chunk then
                 if err then
-                    error("fs: error while reading: " .. err)
+                    error("fs: error while reading: " .. err ..
+                        " (path=" .. path .. " handle=" .. tostring(self.handle) .. ")")
                 end
                 break
             end
-            chunks = chunks .. chunk
+            content = content .. chunk
         end
-        return chunks
+        return content
     end
 
     function file:seek(whence, offset)
@@ -873,7 +781,7 @@ function vfs.chmod(path, mode)
     if not canModify then return nil, "Permission denied" end
 
     vnode.mode = mode
-    vfs._dirty = true
+    vfs.saveMetadata()
 end
 
 ---@param path string
@@ -898,7 +806,7 @@ function vfs.chown(path, uid, gid)
 
     vnode.uid = uid
     vnode.gid = gid
-    vfs._dirty = true
+    vfs.saveMetadata()
 end
 
 local function writeMeta(dirPath, children, fs)
@@ -935,6 +843,62 @@ local function writeMeta(dirPath, children, fs)
     end
 end
 
+local function loadDirMetadata(path, parent, fs)
+    local metaPath = (path == "/" and "" or path) .. "/.meta"
+    if not fs.exists(metaPath) then return end
+
+    local handle = fs.open(metaPath, "r")
+    if not handle then return end
+
+    local buffer = ""
+    repeat
+        local data = fs.read(handle, 1024)
+        if data then buffer = buffer .. data end
+    until not data
+    fs.close(handle)
+
+    for line in string.gmatch(buffer, "[^\r\n]+") do
+        local name, vtype, hash, mtime, btime, mode, refcount, uid, gid, link =
+            string.match(line, "^([^:]+):([^:]+):(%d+):(%d+):(%d+):(%d+):(%d+):(%d+):(%d+):?(.*)")
+
+        if name then
+            local name_hash = fnv1a_hash(name)
+            local child     = parent.children[name_hash]
+
+            if not child then
+                if vtype == "VLNK" then
+                    child = {
+                        name     = name,
+                        hash     = name_hash,
+                        type     = vtype,
+                        parent   = parent,
+                        children = {},
+                        fs       = fs,
+                        link     = (link ~= "" and link or nil),
+                        mtime    = tonumber(mtime),
+                        btime    = tonumber(btime),
+                        refcount = tonumber(refcount),
+                        mode     = tonumber(mode),
+                        uid      = tonumber(uid),
+                        gid      = tonumber(gid),
+                    }
+                    parent.children[name_hash] = child
+                end
+            else
+                child.mtime    = tonumber(mtime)
+                child.btime    = tonumber(btime)
+                child.mode     = tonumber(mode)
+                child.refcount = tonumber(refcount)
+                child.uid      = tonumber(uid)
+                child.gid      = tonumber(gid)
+                if vtype == "VLNK" and link and link ~= "" then
+                    child.link = link
+                end
+            end
+        end
+    end
+end
+
 function vfs.saveMetadata()
     local function saveDir(vnode)
         local fs = vnode.fs
@@ -953,12 +917,11 @@ function vfs.saveMetadata()
         end
     end
 
-    if vfs_root then saveDir(vfs_root) end
+    local root = vtab[vfs_root_hash]
+    if root then saveDir(root) end
     return true
 end
 
--- lookupFilesystemは互換性のため残すが、mount()からは呼ばれない
--- 必要な場合のみ明示的に呼び出す
 ---@param basePath string
 ---@param fs oc_component_fs
 function vfs.lookupFilesystem(basePath, fs)
@@ -1057,11 +1020,11 @@ loadfile = function(filename, mode, env)
     if not file then return nil, err end
 
     local chunks = {}
-    local buffer_size = 8192
+    local buffer_size = 8192 
 
     while true do
         local data, reason = file:read(buffer_size)
-
+        
         if not data then
             if reason then
                 file:close()
@@ -1069,13 +1032,14 @@ loadfile = function(filename, mode, env)
             end
             break
         end
-
+        
         table.insert(chunks, data)
     end
     file:close()
 
     local buffer = table.concat(chunks)
-    chunks = nil
+    
+    chunks = nil 
 
     local chunk, load_err = load(buffer, "=" .. filename, mode or "bt", env or (util and util.createEnv() or _G))
     if not chunk then return nil, load_err end
