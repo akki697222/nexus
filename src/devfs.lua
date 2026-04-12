@@ -21,15 +21,8 @@ local next_handle = 1
 
 ---@type module
 local module
-
-local function read()
-    local tty = module.require("tty") --[[@as module_tty]]
-    if tty then
-        return tty.read()
-    else
-        return nil
-    end
-end
+---@type system
+local system
 
 function devfs.init()
     vfs.mount(devfs, "/dev")
@@ -40,45 +33,16 @@ function devfs.init()
         i = i + 1
     end
 
-    local ttyavail = false
-    local tty = nil
-    local stdin = {
-        read = function(_, ...)
-            return read()
-        end
-    }
-    local stdout = {
-        write = function(_, v)
-            if ttyavail and not config.console_force_framebuffer then
-                if not tty then tty = module.require("tty") --[[@as module_tty]] end
-                tty.write(v)
-            else
-                fbcon.write(v)
-                ttyavail = module.exists("tty") and devfs.exists("tty0")
-            end
-        end
-    }
-    local stderr = {
-        write = function(_, v)
-            if ttyavail and not config.console_force_framebuffer then
-                if not tty then tty = module.require("tty") --[[@as module_tty]] end
-                tty.write("\27[31m" .. v .. "\27[0m")
-            else
-                fbcon.write(v)
-                ttyavail = module.exists("tty") and devfs.exists("tty0")
-            end
-        end
-    }
-    local _, _, vstdin = devfs.create("stdin", stdin)
-    local _, _, vstdout = devfs.create("stdout", stdout)
-    local _, _, vstderr = devfs.create("stderr", stderr)
+    local _, _, vstdin = devfs.create("stdin", system.console.stdin)
+    local _, _, vstdout = devfs.create("stdout", system.console.stdout)
+    local _, _, vstderr = devfs.create("stderr", system.console.stderr)
 
     vhandles["0"] = { flag = "r", fd = 0, fs = devfs, vnode = vstdin }
     vhandles["1"] = { flag = "w", fd = 1, fs = devfs, vnode = vstdout }
     vhandles["2"] = { flag = "w", fd = 2, fs = devfs, vnode = vstderr }
-    handles["0"] = { mode = "r", driver = stdin }
-    handles["1"] = { mode = "w", driver = stdout }
-    handles["2"] = { mode = "w", driver = stderr }
+    handles["0"] = { mode = "r", driver = system.console.stdin }
+    handles["1"] = { mode = "w", driver = system.console.stdout }
+    handles["2"] = { mode = "w", driver = system.console.stderr }
 end
 
 ---@param name string

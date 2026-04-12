@@ -1,6 +1,6 @@
 local vfs
-local runProcessQueue
-local resumeKernelThreads
+local runProcessQueue = function()end
+local resumeKernelThreads = function()end
 
 ---@class fbcon : console_device
 local fbcon = {
@@ -51,6 +51,7 @@ function fbcon.write(text)
 
     text = tostring(text or "")
     local len = #text
+    local final = ""
     local i = 1
 
     while i <= len do
@@ -85,15 +86,16 @@ function fbcon.write(text)
             if fbcon.cy > fbcon.height then
                 fbcon.scroll()
             end
-
+            
+            final = final .. c
             gpu.set(fbcon.cx, fbcon.cy, c)
             fbcon.cx = fbcon.cx + 1
         end
         i = i + 1
     end
-end
-
-function fbcon.update()
+    if fbcon.buffer then
+        table.insert(fbcon.buffer, final)
+    end
 end
 
 function fbcon.getSize()
@@ -145,7 +147,19 @@ panic = function(err, reason)
             computer.pullSignal()
         end
     else
-        printk("Kernel panic - " .. err .. ": " .. reason)
+        local header = "Kernel panic - " .. err .. ": " .. reason
+        printk(header)
+        printk("PID: " .. tostring(process.current) .. " " .. _OSVERSIONSTRING)
+        printk("Hardware name: " .. _MACHINE)
+        printk("Call Trace:")
+        local trace = debug.traceback("", 2)
+        local first = true
+        for line in string.gmatch(trace, "([^\r\n]+)") do
+            if not first then
+                printk("  " .. string.match(line, "^%s*(.*)"))
+            end
+            first = false
+        end
         for _ = 0, 2 do
             computer.beep()
         end

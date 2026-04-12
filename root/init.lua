@@ -1,8 +1,6 @@
 ---@type oc_env
 _ENV = _ENV
 
-_OSDIST = "Nexus Alpha 0.1.0-ocdev_ocelot"
-
 ---@param env? table
 loadfile = function(file, env)
     local addr, invoke = computer.getBootAddress(), component.invoke

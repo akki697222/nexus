@@ -22,8 +22,6 @@ local system = require("system")
 
 process.listenSignal(2, function() end)
 
-print("Total Memory: " .. computer.totalMemory() .. " bytes")
-
 local function status(id, msg)
     local c = colors.green .. " * "
     if id == 1 then

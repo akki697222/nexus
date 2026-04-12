@@ -94,12 +94,19 @@ end
 fbcon.reset()
 
 -- Mount root
-local s, e = vfs.mount(computer.getBootAddress(), "/")
-if not s then
-    printk("mount: " .. e)
-    panic("not syncing", "VFS: Unable to mount root fs on " .. computer.getBootAddress())
+do
+    local s, e = vfs.mount(computer.getBootAddress(), "/")
+    if not s then
+        printk("mount: " .. e)
+        panic("not syncing", "VFS: unable to mount root fs on " .. computer.getBootAddress())
+    end
 end
-vfs.mount(computer.tmpAddress(), "/tmp")
+do
+    local s, e = vfs.mount(computer.tmpAddress(), "/tmp")
+    if not s then
+        printk("VFS: unable to mount tmp fs on " .. computer.tmpAddress())
+    end
+end
 vfs.chmod("/tmp", 1777)
 
 vfs.link("/usr/sbin", "/sbin")
@@ -136,14 +143,50 @@ do
     end
 end
 
-module.autoload()
-if module.exists("tty") then
-    local tty = module.require("tty") --[[@as module_tty]]
-    tty.new(0)
+-- initialize tty
+do
+    local tty
+    local s, e = xpcall(function()
+        module.autoload()
+        if module.exists("tty") then
+            tty = module.require("tty") --[[@as module_tty]]
+            tty.new(0)
+        end
+    end, debug.traceback)
+    if not s then
+        panic("not syncing", "failed to initialize console: " .. e)
+    end
+    system.setConsole({
+        stdin = {
+            read = function(_, ...)
+                return tty.read()
+            end
+        },
+        stdout = {
+            write = function(_, v)
+                tty.write(v)
+            end
+        },
+        stderr = {
+            write = function(_, v)
+                tty.write("\27[31m" .. v .. "\27[0m")
+            end
+        }
+    })
+    for _, value in ipairs(fbcon.buffer) do
+        printk(value)
+    end
+    fbcon.buffer = nil
 end
 
 -- boot message
 printk("Booting " .. _OSVERSION)
+printk("Nexus version " .. _OSVERSIONSTRING .. " (" .. computer.getArchitecture() .. ")")
+printk("machine: " .. _MACHINE)
+local total_kb = math.floor(computer.totalMemory() / 1024)
+local free_kb = math.floor(computer.freeMemory() / 1024)
+local used_kb = total_kb - free_kb
+printk("Memory: " .. free_kb .. "KB/" .. total_kb .. "KB available (" .. used_kb .. "KB reserved)")
 
 local init_path = nil
 if #kargs ~= 0 then
@@ -161,6 +204,7 @@ end
 if not init_path or (init_path and not vfs.exists(init_path)) then
     panic("not syncing", "No init found. Try passing init= option to kernel.")
 end
+printk("init: starting " .. init_path .. " (PID 1)")
 local pid, e = process.exec(init_path, { _OSVERSION }, 0, util.createEnv(), 1)
 if pid == -1 then
     panic("not syncing", "Failed to start init process: " .. e)

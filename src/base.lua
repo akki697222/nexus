@@ -11,11 +11,6 @@ log_buffer = setmetatable({}, {
     end
 })
 bootRealTime = 0
-
-_OSVERSION = _OSVERSION or "Nexus 0.1.0-dev-oc_ocelot"
-_OSVERSIONNUMBER = _OSVERSIONNUMBER or 1
-_OSDIST = _OSDIST or _OSVERSION
-
 getRealTime = function()
     return bootRealTime + computer.uptime()
 end
@@ -28,6 +23,18 @@ do
         config = f() or {}
     end
 end
+
+version = {
+        id = "Nexus 0.1.0-dev-oc_ocelot";
+        name = "Nexus";
+        ver = "0.1.0-dev-oc_ocelot";
+        dist = "Nexus";
+    };
+_OSVERSION = config.version.id
+_OSVERSIONSTRING = config.version.ver
+_OSDIST = config.version.dist
+_OSNAME = config.version.name
+_MACHINE = "OpenComputers (" .. computer.getArchitecture() .. ")"
 
 ---@param env? table
 loadfile = function(file, env) end

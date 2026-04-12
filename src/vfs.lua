@@ -256,11 +256,11 @@ function vfs.attributes(path)
     if not current then return nil, nil, nil end
     if path == "/" then return current, nil, current end
 
-    path                 = vfs.resolve(path)
-    local norm_path      = vfs.canonical(path)
-    local parts          = vfs.segments(norm_path)
+    path = vfs.resolve(path)
+    local norm_path = vfs.canonical(path)
+    local parts = vfs.segments(norm_path)
 
-    local mount_node     = current
+    local mount_node = current
     local relative_parts = {}
 
     for i, name in ipairs(parts) do
