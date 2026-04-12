@@ -12,6 +12,8 @@ process = process
 package = package
 ---@type devfs
 devfs = devfs
+---@type procfs
+procfs = procfs
 ---@type module
 module = module
 ---@type event
@@ -128,6 +130,13 @@ system.createKernelThread(function()
         coroutine.yield()
     end
 end, "vfs_sync", {})
+
+do
+    local s, e = vfs.mount(procfs, "/proc")
+    if not s then
+        printk("procfs: mount failed: " .. e)
+    end
+end
 
 devfs.init()
 user.init()
