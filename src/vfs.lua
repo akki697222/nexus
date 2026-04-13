@@ -939,7 +939,7 @@ function vfs.lookupFilesystem(basePath, fs)
             name = name:gsub("^/*", ""):gsub("/*$", "")
             if name ~= ".meta" then
                 local dpath = vfs.concat(path, name)
-                printk("vfs: indexing '" .. dpath .. "'")
+                --printk("vfs: indexing '" .. dpath .. "'")
                 local isDir = fs.isDirectory(dpath)
                 local vnode = createVNode(name, isDir and "VDIR" or "VREG", parent, fs)
                 if isDir then

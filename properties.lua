@@ -22,6 +22,7 @@ properties.includes = {
     "group.lua",
     "module.lua",
     "event.lua",
+    "device.lua",
     "io.lua",
     "os.lua",
     "system.lua",

@@ -12,6 +12,8 @@ process = process
 package = package
 ---@type devfs
 devfs = devfs
+---@type device
+device = device
 ---@type procfs
 procfs = procfs
 ---@type module
@@ -36,6 +38,7 @@ package.preload.sha2 = setmetatable({}, { __index = sha2 })
 package.preload.system = setmetatable({}, { __index = system })
 package.preload.user = setmetatable({}, { __index = user })
 package.preload.group = setmetatable({}, { __index = group })
+package.preload.device = setmetatable({}, { __index = device })
 
 -- default lua environment for openos compability
 local env = {
@@ -94,6 +97,20 @@ end
 
 -- resets framebuffer controller
 fbcon.reset()
+devfs.init()
+device.init()
+
+-- boot message
+printk("Nexus version " .. _OSVERSIONSTRING)
+local cpu = device.getFromType("processor") --[[@as device_manifest_cpu]]
+printk(computer.getArchitecture() .. "/CPU: " .. cpu.vendor .. " " .. cpu.product .. " @ " .. cpu.clock)
+local total_kb = math.floor(computer.totalMemory() / 1024)
+local free_kb = math.floor(computer.freeMemory() / 1024)
+local used_kb = total_kb - free_kb
+printk("Memory: " .. free_kb .. "KB/" .. total_kb .. "KB available (" .. used_kb .. "KB reserved)")
+for addr, dev in pairs(system_devices) do
+    printk("component [" .. addr .. "] " .. dev.product .. " (" .. dev.desc .. ")")
+end
 
 -- Mount root
 do
@@ -103,10 +120,19 @@ do
         panic("not syncing", "VFS: unable to mount root fs on " .. computer.getBootAddress())
     end
 end
+printk("VFS: Mounted root fs on device " .. computer.getBootAddress() .. ".")
 do
     local s, e = vfs.mount(computer.tmpAddress(), "/tmp")
     if not s then
         printk("VFS: unable to mount tmp fs on " .. computer.tmpAddress())
+    end
+end
+printk("tmpfs: mounted")
+do
+    local s, e = vfs.mount(devfs, "/dev")
+    if not s then
+        printk("mount: " .. e)
+        panic("not syncing", "devfs: unable to mount")
     end
 end
 vfs.chmod("/tmp", 1777)
@@ -138,9 +164,14 @@ do
     end
 end
 
-devfs.init()
 user.init()
 group.init()
+
+do
+    local f = vfs.open("/fuck", "w")
+    f:write(util.encodeTable(computer.getDeviceInfo()))
+    f:close()
+end
 
 -- set boot time
 do
@@ -183,19 +214,10 @@ do
         }
     })
     for _, value in ipairs(fbcon.buffer) do
-        printk(value)
+        tty.write(value .. "\n")
     end
     fbcon.buffer = nil
 end
-
--- boot message
-printk("Booting " .. _OSVERSION)
-printk("Nexus version " .. _OSVERSIONSTRING .. " (" .. computer.getArchitecture() .. ")")
-printk("machine: " .. _MACHINE)
-local total_kb = math.floor(computer.totalMemory() / 1024)
-local free_kb = math.floor(computer.freeMemory() / 1024)
-local used_kb = total_kb - free_kb
-printk("Memory: " .. free_kb .. "KB/" .. total_kb .. "KB available (" .. used_kb .. "KB reserved)")
 
 local init_path = nil
 if #kargs ~= 0 then

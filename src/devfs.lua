@@ -25,14 +25,6 @@ local module
 local system
 
 function devfs.init()
-    vfs.mount(devfs, "/dev")
-
-    local i = 0
-    for proxy in component.list("gpu") do
-        devfs.create("gpu" .. i, component.proxy(proxy) --[[@as oc_component_gpu]])
-        i = i + 1
-    end
-
     local _, _, vstdin = devfs.create("stdin", system.console.stdin)
     local _, _, vstdout = devfs.create("stdout", system.console.stdout)
     local _, _, vstderr = devfs.create("stderr", system.console.stderr)
@@ -43,6 +35,11 @@ function devfs.init()
     handles["0"] = { mode = "r", driver = system.console.stdin }
     handles["1"] = { mode = "w", driver = system.console.stdout }
     handles["2"] = { mode = "w", driver = system.console.stderr }
+end
+
+local DEVFS_CHARS = "abcdefghijklnmopqrstuvwxyz"
+function devfs.char(index)
+    return DEVFS_CHARS:sub(index, index)
 end
 
 ---@param name string
@@ -97,7 +94,7 @@ function devfs.isDirectory(path)
 end
 
 function devfs.list(path)
-    printk("list: " .. path)
+    --printk("list: " .. path)
     if not devfs.isDirectory(path) then return {} end
     local list = {}
     for name, _ in pairs(devices) do
