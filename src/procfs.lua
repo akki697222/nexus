@@ -107,13 +107,13 @@ local function parse_path(path)
 
     local pid = tonumber(first)
     if pid then
-        return pid, (rest ~= "" and ("/" .. rest) or "/status")
+        return pid, (rest ~= "" and ("/" .. rest) or nil)
     end
 
     if first == "self" then
         local cur = process.getCurrent()
         local cur_pid = cur and cur.pid or -1
-        return cur_pid, (rest ~= "" and ("/" .. rest) or "/status")
+        return cur_pid, (rest ~= "" and ("/" .. rest) or nil)
     end
 
     return nil, "/" .. first .. (rest ~= "" and ("/" .. rest) or "")
@@ -123,6 +123,7 @@ local function get_content(path)
     local pid, sub = parse_path(path)
 
     if pid then
+        if sub == nil then return nil end
         if sub == "/status"  then return proc_status(pid)  end
         if sub == "/cmdline" then return proc_cmdline(pid) end
         if sub == "/environ" then return proc_environ(pid) end

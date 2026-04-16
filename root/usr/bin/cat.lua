@@ -1,15 +1,12 @@
-local shell = require("shell")
 local fs = require("filesystem") --[[@as vfs]]
+local module = require("module") --[[@as module]]
 
-local args = shell.parse(...)
-if #args == 0 then
-    args = { "-" }
-end
+local args = {...}
 
-local input_method, input_param = "read", require("tty").getViewport()
+local input_method, input_param = "read", module.require("tty").getCurrent():getViewport()
 
 for i = 1, #args do
-    local arg = shell.resolve(args[i])
+    local arg = fs.resolve(args[i])
     if fs.isDirectory(arg) then
         io.stderr:write(string.format('cat %s: Is a directory\n', arg))
         os.exit(1)

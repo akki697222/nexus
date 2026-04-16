@@ -313,6 +313,7 @@ end
 
 function process.exit(code)
     process.kill(process.current)
+    coroutine.yield("__exit__")
 end
 
 function process.kill(pid)
@@ -481,7 +482,9 @@ function process.resume(proc, ev)
         return true
     end
 
-    if ret == "__event_wait__" then
+    if ret == "__exit__" then
+        return true
+    elseif ret == "__event_wait__" then
         dequeue(run_queue, proc.pid)
         proc.status = "waiting"
         enqueue(wait_queue, proc)

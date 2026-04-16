@@ -20,7 +20,7 @@ while true do
             print("Login failed.\n")
         end
         if shell_pid == -1 then
-            print("login: " .. usr.shell .. ": " .. err)
+            io.stderr:write("login: " .. usr.shell .. ": " .. err)
         else
             process.wait(shell_pid)
         end

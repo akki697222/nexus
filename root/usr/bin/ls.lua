@@ -3,15 +3,23 @@ local fs = require("filesystem")
 local process = require("process")
 local permission = require("permission")
 local colors = require("colors")
-local shell = require("shell")
+local argparse = require("argparse")
+local util = require("util")
 
-local args, options = shell.parse(...)
-local directory = args[1]
-local show_all = options["a"] or options["all"]
-local long_list = options["l"]
+local parser = argparse("list", "List")
+parser:argument("directory", "directory."):args("?")
+parser:flag("-a --all", "Includes hidden files")
+parser:flag("-l", "Long list")
+
+local args = parser:parse({...})
+local directory = args.directory
+local show_all = args.all
+local long_list = args.l
+
+--print(util.encodeTable(args))
 
 if not directory then
-    directory = shell.getWorkingDirectory()
+    directory = process.cwd()
 end
 
 directory = fs.resolve(directory)
@@ -96,6 +104,10 @@ if long_list then
             display_name = colors.cyan .. display_name .. colors.reset .. " -> " .. fs.readlink(fullpath)
         elseif attr.type == "VCHR" then
             ftype = "c"
+            display_name = colors.bright_yellow .. display_name .. colors.reset
+        elseif attr.type == "VBLK" then
+            ftype = "b"
+            display_name = colors.bright_yellow .. display_name .. colors.reset
         else
             display_name = colors.green .. display_name .. colors.reset
         end

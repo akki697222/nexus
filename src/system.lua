@@ -6,19 +6,34 @@ system.console = {
     stdin = {
         read = function(_, ...)
             return nil
-        end
+        end,
+        write = function(_, ...)
+            return nil, "Read-only file system"
+        end,
+        close = function(_) end,
+        seek  = function(_, ...) return nil, "stdin is not seekable" end,
     },
     ---@class stdout
     stdout = {
+        read = function(_, ...)
+            return nil, "stdout is not readable"
+        end,
         write = function(_, v)
             fbcon.write(v)
-        end
+        end,
+        close = function(_) end,
+        seek  = function(_, ...) return nil, "stdout is not seekable" end,
     },
     ---@class stderr
     stderr = {
+        read = function(_, ...)
+            return nil, "stderr is not readable"
+        end,
         write = function(_, v)
             fbcon.write(v)
-        end
+        end,
+        close = function(_) end,
+        seek  = function(_, ...) return nil, "stderr is not seekable" end,
     }
 }
 

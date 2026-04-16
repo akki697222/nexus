@@ -112,20 +112,8 @@ local function wrap(addr, obj)
 end
 
 function device.init()
-    local counts = {
-        volume = 1,
-        floppy = 1
-    }
     for addr, obj in pairs(computer.getDeviceInfo()) do
-        local dev = wrap(addr, obj)
-        local proxy = component.proxy(addr)
-        system_devices[addr] = dev
-        if dev.type == "volume" and proxy then
-            devfs.create("sd" .. devfs.char(counts.volume), proxy)
-            counts.volume = counts.volume + 1
-        elseif dev.type == "floppy" then
-
-        end
+        system_devices[addr] = wrap(addr, obj)
     end
     event.listenBackground(true)
     event.listen("component_added", function (name, addr, type)
@@ -139,6 +127,23 @@ function device.init()
         print("device '" .. addr .. "' removed (" .. type .. ")")
         system_devices[addr] = nil
     end)
+end
+
+function device.register()
+    local counts = {
+        volume = 0,
+        floppy = 0
+    }
+    for addr, dev in pairs(system_devices) do
+        local proxy = component.proxy(addr)
+        if dev.type == "volume" and proxy then
+            devfs.create("hd" .. counts.volume, proxy, true)
+            counts.volume = counts.volume + 1
+        elseif dev.type == "floppy" and proxy then
+            devfs.create("fd" .. counts.floppy, proxy, true)
+            counts.floppy = counts.floppy + 1
+        end
+    end
 end
 
 ---@return table<string, device_manifest> # address = manifest

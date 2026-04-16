@@ -225,6 +225,7 @@ end
 
 function tty_driver:read(...)
     self.in_pid = process.getCurrentPID()
+    event.setForeground(self.in_pid)
     self.reading = true
     self.buffer = ""
     self.eof = false
@@ -317,6 +318,7 @@ function tty.switch(id)
     if not dev then return end
     local proc = process.getCurrent()
     proc.tty = id
+    event.setForeground(proc.pid)
     if dev.device then
         dev.device.dirty = true
     end

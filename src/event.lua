@@ -15,6 +15,7 @@ local handlers = {}
 event.handlers = handlers
 
 local queues = {}
+local foreground_pid = -1
 
 ------------------------------------------------------------
 -- local event queue
@@ -68,6 +69,14 @@ end
 ------------------------------------------------------------
 -- register / listen / cancel
 ------------------------------------------------------------
+
+function event.setForeground(pid)
+    foreground_pid = pid
+end
+
+function event.getForeground()
+    return foreground_pid
+end
 
 function event.register(key, callback, interval, times, opt_handlers)
     ---@type event_handler
@@ -245,13 +254,10 @@ function event.dispatch(ev)
     local is_interactive = interactive_events[ev[1]]
 
     for pid, q in pairs(queues) do
-        local is_foreground = (pid == process.current)
-
-        if not is_interactive or is_foreground then
+        if not is_interactive or pid == foreground_pid then
             q[#q + 1] = ev
         end
     end
-
     dispatch_handlers(ev)
 end
 

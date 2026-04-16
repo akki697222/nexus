@@ -39,6 +39,7 @@ package.preload.system = setmetatable({}, { __index = system })
 package.preload.user = setmetatable({}, { __index = user })
 package.preload.group = setmetatable({}, { __index = group })
 package.preload.device = setmetatable({}, { __index = device })
+package.preload.util = setmetatable({}, { __index = util })
 
 -- default lua environment for openos compability
 local env = {
@@ -92,7 +93,9 @@ local env = {
 }
 
 util.createEnv = function()
-    return setmetatable({}, { __index = env })
+    local newEnv = setmetatable({}, { __index = env })
+    newEnv._G = newEnv
+    return newEnv
 end
 
 -- resets framebuffer controller
@@ -167,6 +170,8 @@ end
 user.init()
 group.init()
 
+device.register()
+
 do
     local f = vfs.open("/fuck", "w")
     f:write(util.encodeTable(computer.getDeviceInfo()))
@@ -213,9 +218,11 @@ do
             end
         }
     })
+    local buf = ""
     for _, value in ipairs(fbcon.buffer) do
-        tty.write(value .. "\n")
+        buf = buf .. value .. "\n"
     end
+    tty.write(buf)
     fbcon.buffer = nil
 end
 

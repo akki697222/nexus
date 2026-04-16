@@ -45,12 +45,12 @@ end
 ---@param name string
 ---@param driver table
 ---@return boolean, string?, vnode?
-function devfs.create(name, driver)
-    --printd("creating device " .. name)
+function devfs.create(name, driver, block)
+    --printd("creating device " .. name .. " (block=" .. tostring(block) .. ")")
     if devices[name] then
         return false, "Device already exists"
     end
-    local vnode = vfs.createVNode("/dev", name, "VCHR", devfs)
+    local vnode = vfs.createVNode("/dev", name, block and "VBLK" or "VCHR", devfs)
     devices[name] = { driver = driver, vnode = vnode }
     return true, nil, vnode
 end
