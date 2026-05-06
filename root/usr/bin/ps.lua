@@ -1,8 +1,13 @@
 local process = require("process")
 local user = require("user")
-local shell = require("shell")
+local argparse = require("argparse")
 
-local args = shell.parse(...)
+local parser = argparse("ps", "Process")
+local args = parser:parse({...})
+parser:flag("a", "Includes hidden files")
+parser:flag("u", "Long list")
+parser:flag("x", "Long list")
+
 local processes = process.list()
 
 print(string.format("%-8s %5s %4s %-6s %s", "USER", "PID", "STAT", "TTY", "COMMAND"))

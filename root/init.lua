@@ -33,7 +33,7 @@ end
 
 local f, e = loadfile("boot/kernel.lua")
 if not f then
-    error(e)
+    error("Unable to load kernel: " .. e)
 else
     local s, e = xpcall(f, debug.traceback, "init=/usr/sbin/init.lua")
     if not s then

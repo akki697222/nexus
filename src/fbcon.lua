@@ -1,5 +1,5 @@
 local vfs
-local runProcessQueue = function()end
+local runProcessQueue = function(event)end
 local resumeKernelThreads = function()end
 
 ---@class fbcon : console_device

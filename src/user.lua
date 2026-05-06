@@ -21,7 +21,7 @@ user = {}
 ---@field home string
 ---@field shell string
 
-user._users = {}
+local users = {}
 
 local function user_getShadows()
     local handle, err = vfs.open("/etc/shadow", "r")
@@ -73,7 +73,7 @@ function user.checkRoot()
 end
 
 function user.updateUsers()
-    local file = vfs.open("/etc/passwd", "r")
+    local file = vfs.open("/etc/passwd", "w")
     if not file then return nil, "cannot open /etc/passwd" end
 
     local content = file:readAll()
@@ -97,11 +97,11 @@ function user.updateUsers()
         end
     end
 
-    user._users = users
+    users = users
 end
 
 function user.getUser(username)
-    for _, entry in ipairs(user._users) do
+    for _, entry in ipairs(users) do
         if entry.username == username then
             return entry
         end
@@ -188,7 +188,7 @@ function user.create(username, password, uid, gid, gecos, shell)
 end
 
 function user.getUserByUID(uid)
-    for _, entry in ipairs(user._users) do
+    for _, entry in ipairs(users) do
         if entry.uid == uid then
             return entry
         end
@@ -257,18 +257,14 @@ function user.switchprocuser(username, password, pid)
 end
 
 function user.init()
-    local root_passwd_line = "root:x:0:0:root:/root:/bin/sh.lua\n"
-    local root_shadow_line = "root:*:0:0:99999:7:::\n"
-
-    if not vfs.exists("/etc/passwd") then
-        local file = vfs.open("/etc/passwd", "w")
-        file:write(root_passwd_line)
-        file:close()
+    -- /etc/passwd and /etc/shadow are pre-created in nexus/root/etc/
+    -- Load users from the existing files
+    if vfs.exists("/etc/passwd") then
+        user.updateUsers()
     end
-    if not vfs.exists("/etc/shadow") then
-        local file = vfs.open("/etc/shadow", "w")
-        file:write(root_shadow_line)
-        file:close()
+    
+    if vfs.exists("/etc/shadow") then
+        vfs.chmod("/etc/shadow", 400)
     end
 
     vfs.chmod("/etc/shadow", 400)

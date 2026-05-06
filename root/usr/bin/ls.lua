@@ -123,7 +123,7 @@ if long_list then
         local group = tostring(attr.gid or "root")
 
         -- Size
-        local size = tostring(attr.size or 0)
+        local size = tostring(attr.size or "?")
 
         -- Time
         local mtime = formatTime(attr.mtime and attr.mtime / 1000 or 0)

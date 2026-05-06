@@ -8,7 +8,7 @@ local input_method, input_param = "read", module.require("tty").getCurrent():get
 for i = 1, #args do
     local arg = fs.resolve(args[i])
     if fs.isDirectory(arg) then
-        io.stderr:write(string.format('cat %s: Is a directory\n', arg))
+        io.stderr:write(string.format('cat: %s: Is a directory\n', arg))
         os.exit(1)
     else
         local file, reason

@@ -13,6 +13,7 @@ local devfs
 ---@field hash integer
 ---@field mtime number
 ---@field btime number
+---@field size integer
 ---@field mode integer
 ---@field children table<integer, vnode>
 ---@field refcount integer
@@ -36,6 +37,7 @@ local devfs
 ---| '"VFIFO"' # FIFO (名前付きパイプ)
 ---| '"VSOCK"' # ソケット (socket)
 ---| '"VLNK"'  # シンボリックリンク (symbolic link)
+
 ---@alias fs_mode
 ---| '"r"'
 ---| '"rb"'
@@ -82,6 +84,7 @@ local function createVNode(name, vtype, parent, fs, perm)
         mode     = perm or (vtype == "VDIR" and 0755 or 0644),
         uid      = 0,
         gid      = 0,
+        size     = 0
     }
     if parent then
         parent.children[hash] = node
@@ -482,6 +485,7 @@ function vfs.link(target, linkpath)
         refcount = 1,
         uid      = 0,
         gid      = 0,
+        size     = 0,
         link     = targetNode,
     }
     vfs.saveMetadata()
@@ -723,7 +727,7 @@ function vfs.open(path, mode)
     function file:readAll()
         local content = ""
         while true do
-            local chunk, err = self.fs.read(self.handle, 1024)
+            local chunk, err = self.fs.read(self.handle, config.read_bytes)
             if not chunk then
                 if err then
                     error("fs: error while reading: " .. err ..
@@ -843,6 +847,7 @@ local function writeMeta(dirPath, children, fs)
     end
 end
 
+---@param parent vnode
 local function loadDirMetadata(path, parent, fs)
     local metaPath = (path == "/" and "" or path) .. "/.meta"
     if not fs.exists(metaPath) then return end
@@ -852,7 +857,7 @@ local function loadDirMetadata(path, parent, fs)
 
     local buffer = ""
     repeat
-        local data = fs.read(handle, 1024)
+        local data = fs.read(handle, config.read_bytes)
         if data then buffer = buffer .. data end
     until not data
     fs.close(handle)
@@ -875,22 +880,24 @@ local function loadDirMetadata(path, parent, fs)
                         children = {},
                         fs       = fs,
                         link     = (link ~= "" and link or nil),
-                        mtime    = tonumber(mtime),
-                        btime    = tonumber(btime),
-                        refcount = tonumber(refcount),
-                        mode     = tonumber(mode),
-                        uid      = tonumber(uid),
-                        gid      = tonumber(gid),
+                        mtime    = tonumber(mtime) or 0,
+                        btime    = tonumber(btime) or 0,
+                        refcount = tonumber(refcount) or 0,
+                        mode     = tonumber(mode) or 0,
+                        uid      = tonumber(uid) or 0,
+                        gid      = tonumber(gid) or 0,
+                        size     = 0
                     }
                     parent.children[name_hash] = child
                 end
             else
-                child.mtime    = tonumber(mtime)
-                child.btime    = tonumber(btime)
-                child.mode     = tonumber(mode)
-                child.refcount = tonumber(refcount)
-                child.uid      = tonumber(uid)
-                child.gid      = tonumber(gid)
+                child.mtime    = tonumber(mtime) or 0
+                child.btime    = tonumber(btime) or 0
+                child.mode     = tonumber(mode) or 0
+                child.refcount = tonumber(refcount) or 0
+                child.uid      = tonumber(uid) or 0
+                child.gid      = tonumber(gid) or 0
+                child.size     = 0
                 if vtype == "VLNK" and link and link ~= "" then
                     child.link = link
                 end
@@ -944,6 +951,8 @@ function vfs.lookupFilesystem(basePath, fs)
                 local vnode = createVNode(name, isDir and "VDIR" or "VREG", parent, fs)
                 if isDir then
                     table.insert(subdirs, { path = dpath, vnode = vnode })
+                else
+                    vnode.size = fs.size(dpath)
                 end
             end
         end
@@ -1020,10 +1029,9 @@ loadfile = function(filename, mode, env)
     if not file then return nil, err end
 
     local chunks = ""
-    local buffer_size = 8192 
 
     while true do
-        local data, reason = file:read(buffer_size)
+        local data, reason = file:read(config.read_bytes)
         
         if not data then
             if reason then

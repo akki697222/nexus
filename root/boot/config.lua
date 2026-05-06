@@ -13,6 +13,8 @@ local config = {
     console_vt_debug = false;
     -- Kernel
     bsod = false;
+    -- Filesystem
+    read_bytes = math.huge
 }
 
 return config

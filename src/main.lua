@@ -167,16 +167,15 @@ do
     end
 end
 
-user.init()
-group.init()
-
 device.register()
 
+--[[
 do
     local f = vfs.open("/fuck", "w")
     f:write(util.encodeTable(computer.getDeviceInfo()))
     f:close()
 end
+]]
 
 -- set boot time
 do
@@ -225,6 +224,9 @@ do
     tty.write(buf)
     fbcon.buffer = nil
 end
+
+user.init()
+group.init()
 
 local init_path = nil
 if #kargs ~= 0 then

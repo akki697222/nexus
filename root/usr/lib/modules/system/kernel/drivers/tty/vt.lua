@@ -509,7 +509,7 @@ local vt = {}
 
 ---@param id integer
 function vt.new(id)
-    local dev = setmetatable({}, vt_driver)
+    local dev = setmetatable({}, {__index = vt_driver})
     devfs.create("ttyv" .. tostring(id), dev)
     dev:init()
     table.insert(vts, {dev = dev, id = id})

@@ -483,6 +483,7 @@ function process.resume(proc, ev)
     end
 
     if ret == "__exit__" then
+        proc.status = "dead"
         return true
     elseif ret == "__event_wait__" then
         dequeue(run_queue, proc.pid)

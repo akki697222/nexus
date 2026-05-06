@@ -55,7 +55,7 @@ function tty_driver:init()
         vt = m.module
     end
     self.console.minor = self.id + 1
-    self.device = vt.new(self.console.minor)
+    self.device = vt.new(self.id)
 end
 
 function tty_driver:read_pump(mask)
@@ -229,7 +229,6 @@ function tty_driver:read(...)
     self.reading = true
     self.buffer = ""
     self.eof = false
-    self.eof = false
 
     local formats = table.pack(...)
     if formats.n == 0 then formats = { "*l", n = 1 } end
@@ -305,7 +304,7 @@ end
 local tty = {}
 
 function tty.new(id)
-    local dev = setmetatable({}, tty_driver)
+    local dev = setmetatable({}, {__index = tty_driver})
     devfs.create("tty" .. tostring(id), dev)
     dev.id = id
     dev:init()

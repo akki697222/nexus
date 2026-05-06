@@ -19,7 +19,7 @@ function thread.create(thread_proc, ...)
     local args = { ... }
     local pid = process.createThread(function(...)
         local result = { thread_proc(...) }
-    end, args, "thread")
+    end, "thread", args)
 
     return create_handle(pid)
 end
