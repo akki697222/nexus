@@ -1,5 +1,6 @@
 ---@class procfs : oc_component_fs
 local procfs = {}
+procfs.dynamic = true 
 
 local virtual_files = {}
 
@@ -149,7 +150,9 @@ function procfs.exists(path)
     local pid, sub = parse_path(path)
     if pid then
         if not process.get(pid) then return false end
-        local valid = { ["/status"]=true, ["/cmdline"]=true, ["/environ"]=true, ["/fd"]=true }
+        if sub == nil then return true end
+        local valid = { ["/status"]=true, ["/cmdline"]=true,
+                        ["/environ"]=true, ["/fd"]=true }
         return valid[sub] == true
     end
     if sub then

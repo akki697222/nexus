@@ -5,6 +5,10 @@ module = {}
 local kmodule_loaded = {}
 
 function module.autoload()
+    if process.current > 0 then
+        return nil, "Permission Denied"
+    end
+
     local f, err = loadfile("/etc/modules.lua", "bt", util.createEnv())
     if not f then
         printk("module: autoload: " .. (err or "no /etc/modules.lua found"))
@@ -27,6 +31,10 @@ end
 
 ---@return kernel_module|nil, string|nil # error
 function module.load(path)
+    if process.current > 0 then
+        return nil, "Permission Denied"
+    end
+
     local f, err = loadfile(vfs.resolve(path), "bt", util.createEnv())
 
     if not f then
@@ -75,6 +83,10 @@ end
 
 ---@return string|nil
 function module.unload(name)
+    if process.current > 0 then
+        return "Permission Denied"
+    end
+
     ---@type kernel_module|nil
     local mod = kmodule_loaded[name]
     if mod then

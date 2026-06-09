@@ -28,4 +28,5 @@ properties.includes = {
     "system.lua",
     "main.lua",
 }
+properties.overwrite = true
 return properties

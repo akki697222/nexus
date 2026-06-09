@@ -1,3 +1,4 @@
+---@return string
 function os.getenv(key)
     return process.getEnviron(key)
 end

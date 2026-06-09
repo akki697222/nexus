@@ -14,7 +14,7 @@ local config = {
     -- Kernel
     bsod = false;
     -- Filesystem
-    read_bytes = math.huge
+    read_bytes = math.huge;
 }
 
 return config

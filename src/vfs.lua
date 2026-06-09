@@ -202,15 +202,14 @@ function vfs.attributes(path)
     if not current then return nil, nil, nil end
     if path == "/" then return current, nil, current end
 
-    path                 = vfs.resolve(path)
-    local norm_path      = vfs.canonical(path)
-    local parts          = vfs.segments(norm_path)
+    path = vfs.resolve(path)
+    local norm_path = vfs.canonical(path)
+    local parts = vfs.segments(norm_path)
 
-    local mount_node     = current
+    local mount_node = current
     local relative_parts = {}
 
     for i, name in ipairs(parts) do
-        -- シンボリックリンク解決
         while current.type == "VLNK" and current.link do
             local link_path
             if type(current.link) == "string" then
@@ -241,12 +240,35 @@ function vfs.attributes(path)
                     next_node = node; break
                 end
             end
+            if not next_node and current.fs and current.fs.dynamic then
+                local fs_rel    = getFsRelativePath(current)
+                local check     = (fs_rel == "/" and "" or fs_rel) .. "/" .. name
+                if current.fs.exists(check) then
+                    local isDir = current.fs.isDirectory(check)
+                    next_node = {
+                        name     = name,
+                        hash     = name_hash,
+                        type     = isDir and "VDIR" or "VREG",
+                        parent   = current,
+                        children = {},
+                        fs       = current.fs,
+                        link     = nil,
+                        mtime    = 0,
+                        btime    = 0,
+                        refcount = 1,
+                        mode     = isDir and 0555 or 0444,
+                        uid      = 0,
+                        gid      = 0,
+                        size     = 0,
+                    }
+                end
+            end
             if not next_node then return nil, nil, nil end
         end
         current = next_node
 
         if current.fs then
-            mount_node     = current
+            mount_node = current
             relative_parts = {}
         else
             table.insert(relative_parts, name)
@@ -386,7 +408,9 @@ function vfs.mount(fs, path)
         parent = vfs.attributes(vfs.path(path))
     end
     vnode = createVNode(vfs.name(path), "VDIR", parent, fs)
-    if path == "/" then vtab[vfs_root_hash] = vnode end
+    if path == "/" then 
+        vtab[vfs_root_hash] = vnode 
+    end
     vfs.lookupFilesystem(path, fs)
     return true
 end
@@ -487,6 +511,7 @@ function vfs.link(target, linkpath)
         gid      = 0,
         size     = 0,
         link     = targetNode,
+        parent   = parentNode,
     }
     vfs.saveMetadata()
     return true
@@ -586,6 +611,20 @@ function vfs.list(path)
         end
     end
 
+    if vnode.fs and vnode.fs.dynamic then
+        local fs_path = getFsRelativePath(vnode)
+        local entries = vnode.fs.list(fs_path)
+        if entries and type(entries) == "table" then
+            table.sort(entries)
+            local i = 0
+            return function()
+                i = i + 1
+                return entries[i]
+            end
+        end
+        return nil, "No such file or directory"
+    end
+
     local list = {}
     for _, node in pairs(vnode.children) do
         table.insert(list, node.name)
@@ -603,13 +642,16 @@ end
 ---@return string|nil
 function vfs.makeDirectory(path)
     path = vfs.resolve(path)
-    local parent_vnode, rest, mp = vfs.attributes(vfs.path(path))
-    if vfs.exists(path) or not (parent_vnode and mp) then
+    local parent_vnode, _, mp = vfs.attributes(vfs.path(path))
+
+    if vfs.exists(path) then
         return false, "File exists"
     end
-    -- FIX: getFsRelativePath で親のFS相対パスを取得してから dirname を結合する
-    --      旧コードの rest は /tmp/foo → tmp/foo の相対パスなので tmpfs では動くが
-    --      マウントポイントが深い場合に誤ったパスを渡す可能性があった
+
+    if not parent_vnode or not mp then
+        return false, "No such file or directory"
+    end
+
     local parent_fs_path = getFsRelativePath(parent_vnode)
     local full_rest
     if parent_fs_path == "/" then
@@ -617,6 +659,7 @@ function vfs.makeDirectory(path)
     else
         full_rest = parent_fs_path .. "/" .. vfs.name(path)
     end
+
     local s, e = mp.fs.makeDirectory(full_rest)
     if s then
         createVNode(vfs.name(path), "VDIR", parent_vnode, mp.fs)

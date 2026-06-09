@@ -214,6 +214,7 @@ function process.exec(path, args, nice, env, pid, uid, gid)
         return -1, err
     end
     local pid = pid or get_pid()
+    used_pids[pid] = true
     if not func then return end
     local cwd = vfs.root()
     local current = process.getCurrent()

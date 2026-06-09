@@ -49,7 +49,6 @@ end
 ---@return table|nil
 ---@return string|nil
 function io.popen(prog, mode)
-    -- カーネルからユーザーランドライブラリを呼び出す
     local pipe_lib = require("pipe")
     mode = mode or "r"
 

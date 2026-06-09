@@ -73,13 +73,13 @@ function user.checkRoot()
 end
 
 function user.updateUsers()
-    local file = vfs.open("/etc/passwd", "w")
+    local file = vfs.open("/etc/passwd", "r")
     if not file then return nil, "cannot open /etc/passwd" end
+
+    users = {}
 
     local content = file:readAll()
     file:close()
-
-    local users = {}
     for line in content:gmatch("[^\r\n]+") do
         local username, password, uid, gid, gecos, home, shell = line:match(
             "^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)")
@@ -96,8 +96,6 @@ function user.updateUsers()
             })
         end
     end
-
-    users = users
 end
 
 function user.getUser(username)
@@ -114,7 +112,7 @@ function user.create(username, password, uid, gid, gecos, shell)
     uid = uid or 100
     gid = gid or uid
 
-    if not group.getGroupByGID(uid) then
+    if not group.getGroupByGID(gid) then
         group.create(username, gid, { username })
     end
 
@@ -165,6 +163,9 @@ function user.create(username, password, uid, gid, gecos, shell)
     passwd_file:close()
 
     user.updateUsers()
+    if not vfs.exists("/home") then
+        vfs.makeDirectory("/home")
+    end
 
     local home = vfs.concat("/home", username)
     vfs.makeDirectory(home)
@@ -174,11 +175,12 @@ function user.create(username, password, uid, gid, gecos, shell)
         local f, e = vfs.open(prof, "w")
         if f then
             f:write("local colors = require(\"colors\")\n")
-            f:write("local shell = require(\"shell\")\n")
+            f:write("local process = require(\"process\")\n")
             f:write("os.setenv(\"HISTSIZE\", \"10\")\n")
             f:write("os.setenv(\"HOME\", \"" .. home .. "\")\n")
+            f:write("os.setenv(\"PWD\", \"" .. home .. "\")")
             f:write("os.setenv(\"PS1\", colors.green .. \"$USERNAME@$HOSTNAME\" .. colors.reset .. \":\" .. colors.bright_blue .. \"$PWD\" .. colors.reset .. \"$ \")\n")
-            f:write("shell.setWorkingDirectory(os.getenv(\"HOME\"))")
+            f:write("process.cwd(os.getenv(\"HOME\"))")
             f:close()
         else
             printk("user: create: cannot open '" .. prof .. "': " .. e)
@@ -233,22 +235,24 @@ end
 ---@return user_passwd|nil, nil|string
 function user.switchprocuser(username, password, pid)
     if user.checkPasswordCorrect(username, password) then
-        ---@type user_passwd
-        local usr = user.getUser(username) --[[@as user_passwd]]
+        local usr = user.getUser(username)
         if not usr then return nil, "User not found" end
 
         local proc = process.get(pid)
         if not proc then return nil, "Process not found" end
-        proc.uid = usr.uid
+
+        proc.uid  = usr.uid
         proc.euid = usr.uid
         proc.suid = usr.uid
-        proc.gid = usr.gid
+        proc.gid  = usr.gid
         proc.egid = usr.gid
         proc.sgid = usr.gid
 
-        process.setEnviron("HOME", usr.home)
-        process.setEnviron("USER", usr.username)
-        process.setEnviron("SHELL", usr.shell)
+        proc.environ["HOME"]     = usr.home
+        proc.environ["USER"]     = usr.username
+        proc.environ["USERNAME"] = usr.username
+        proc.environ["SHELL"]    = usr.shell
+        proc.environ["PWD"]      = usr.home
 
         return usr
     else
@@ -257,14 +261,22 @@ function user.switchprocuser(username, password, pid)
 end
 
 function user.init()
-    -- /etc/passwd and /etc/shadow are pre-created in nexus/root/etc/
-    -- Load users from the existing files
-    if vfs.exists("/etc/passwd") then
-        user.updateUsers()
+    if not vfs.exists("/etc/passwd") then
+        local f, e = vfs.open("/etc/passwd", "w")
+        if not f then
+            panic("not syncing", "Unable to open /etc/passwd: " .. e)
+        end
+        f:write("root:x:0:0:root:/root:/bin/sh.lua\n")
+        f:close()
     end
-    
-    if vfs.exists("/etc/shadow") then
-        vfs.chmod("/etc/shadow", 400)
+
+    if not vfs.exists("/etc/shadow") then
+        local f, e = vfs.open("/etc/shadow", "w")
+        if not f then
+            panic("not syncing", "Unable to open /etc/shadow: " .. e)
+        end
+        f:write("root:*:0:0:99999:7:::\n")
+        f:close()
     end
 
     vfs.chmod("/etc/shadow", 400)
