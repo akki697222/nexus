@@ -1,6 +1,3 @@
----@type log
-local log = {}
-
 log.level = {
     info  = 0,
     warn  = 1,

@@ -2,9 +2,6 @@
 -- Released under the MIT license
 -- https://opensource.org/licenses/mit-license.php
 
----@type capability
-local capability = {}
-
 ---@type table<string, cap_def>
 local caps = {}
 
