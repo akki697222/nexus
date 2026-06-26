@@ -2,6 +2,9 @@
 -- Released under the MIT license
 -- https://opensource.org/licenses/mit-license.php
 
+---@type event_api
+local event = {}
+
 ---@type integer
 local next_handle = 1
 

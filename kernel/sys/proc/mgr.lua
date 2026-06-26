@@ -2,6 +2,9 @@
 -- Released under the MIT license
 -- https://opensource.org/licenses/mit-license.php
 
+---@type process_manager
+local process_manager = {}
+
 ---@type table<integer, process>
 local processes = {}
 
@@ -80,6 +83,8 @@ function process_manager.spawn(opts)
     -- push a bootstrap event so the process gets resumed on the first tick
     router.push_to(pid, { type = "process_spawned", pid = pid })
 
+    log.info("Process %d spawned (parent=%d, path=%s)", pid, parent_pid, opts.path)
+
     return pid
 end
 
@@ -119,6 +124,8 @@ function process_manager.kill(pid, reason)
         pid    = pid,
         reason = reason,
     })
+
+    log.info("Process %d terminated (%s)", pid, reason)
 end
 
 function process_manager.reap(pid, reason, code)

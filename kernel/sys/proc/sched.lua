@@ -2,6 +2,9 @@
 -- Released under the MIT license
 -- https://opensource.org/licenses/mit-license.php
 
+---@type scheduler
+local scheduler = {}
+
 ---@type table<integer, process>
 local processes = {}
 

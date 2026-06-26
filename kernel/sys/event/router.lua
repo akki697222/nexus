@@ -2,6 +2,9 @@
 -- Released under the MIT license
 -- https://opensource.org/licenses/mit-license.php
 
+---@type router
+local router = {}
+
 ---@type event[]
 local bus = {}
 

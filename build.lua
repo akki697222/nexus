@@ -4,58 +4,43 @@
 
 -- ============================================================
 --  build.lua
---  Reads properties.lua for source roots and build settings.
---  Each source root must contain a main.lua with ---@output <path>.
---  Output is written to <build_dir>/<output path>.
+--  Reads src/main.lua, resolves ---@bundle directives,
+--  and writes a single concatenated output file.
 -- ============================================================
 
--- ------------------------------------------------------------
---  Load properties
--- ------------------------------------------------------------
-
-local props_chunk, err = loadfile("properties.lua")
-if not props_chunk then
-    io.stderr:write("failed to load properties.lua: " .. tostring(err) .. "\n")
-    os.exit(1)
-end
-props_chunk()
-
--- validate
-assert(type(sources)     == "table",  "properties.lua: 'sources' must be a table")
-assert(type(build_dir)   == "string", "properties.lua: 'build_dir' must be a string")
-assert(type(deploy_root) == "string", "properties.lua: 'deploy_root' must be a string")
+local SRC   = "src/main.lua"
+local OUT   = "build/init.lua"
 
 -- ------------------------------------------------------------
 --  Helpers
 -- ------------------------------------------------------------
 
+---Read all text from a file. Errors on failure.
 ---@param path string
 ---@return string
 local function read_file(path)
-    local f, e = io.open(path, "r")
+    local f, err = io.open(path, "r")
     if not f then
-        error("failed to open '" .. path .. "': " .. tostring(e))
+        error("failed to open '" .. path .. "': " .. tostring(err))
     end
     local content = f:read("*a")
     f:close()
     return content
 end
 
+---Write text to a file, creating parent dirs implicitly via the OS.
 ---@param path string
 ---@param content string
 local function write_file(path, content)
-    local dir = path:match("^(.+)[/\\][^/\\]+$")
-    if dir then
-        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
-    end
-    local f, e = io.open(path, "w")
+    local f, err = io.open(path, "w")
     if not f then
-        error("failed to write '" .. path .. "': " .. tostring(e))
+        error("failed to write '" .. path .. "': " .. tostring(err))
     end
     f:write(content)
     f:close()
 end
 
+---Strip leading/trailing blank lines from a string.
 ---@param s string
 ---@return string
 local function trim_blank_lines(s)
@@ -64,98 +49,83 @@ local function trim_blank_lines(s)
     return s
 end
 
+---Remove single-line comments (-- ...) from a line.
+---Does not strip inside strings — good enough for source bundling.
 ---@param line string
 ---@return string
 local function strip_comment(line)
-    if line:match("^%s*%-%-") then return "" end
-    return line:gsub("%s*%-%-.*$", "")
+    -- Remove standalone comment lines entirely (return empty string)
+    if line:match("^%s*%-%-") then
+        return ""
+    end
+    -- Remove trailing inline comments
+    -- Simple heuristic: find first -- not inside a string
+    local result = line:gsub("%s*%-%-.*$", "")
+    return result
 end
 
----@param src_root string
----@param rel_path string
+---Process a bundle target file:
+---  - Remove ---@bundle lines (top-level directive, ignored in deps)
+---  - Strip all comments
+---  - Trim surrounding blank lines
+---@param path string
 ---@return string
-local function process_bundle(src_root, rel_path)
-    local content = read_file(src_root .. "/" .. rel_path)
+local function process_bundle(path)
+    path = "src/" .. path
+    local content = read_file(path)
     local lines   = {}
+
     for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-        if not line:match("^%s*%-%-%-%s*@bundle") then
-            lines[#lines + 1] = strip_comment(line)
-        end
-    end
-    return trim_blank_lines(table.concat(lines, "\n"))
-end
-
--- ------------------------------------------------------------
---  Build a single source root
--- ------------------------------------------------------------
-
----@param src_root string
-local function build_source(src_root)
-    local main_path = src_root .. "/main.lua"
-    local main_src  = read_file(main_path)
-
-    -- extract ---@output
-    local output = main_src:match("^%-%-%-%s*@output%s+(.-)%s*$")
-    if not output then
-        -- check all lines
-        for line in (main_src .. "\n"):gmatch("([^\n]*)\n") do
-            output = line:match("^%-%-%-%s*@output%s+(.-)%s*$")
-            if output then break end
-        end
-    end
-    if not output or output == "" then
-        error("no ---@output directive found in " .. main_path)
-    end
-
-    local out_path = build_dir .. "/" .. output
-
-    -- process main.lua line by line
-    local result_lines = {}
-    for line in (main_src .. "\n"):gmatch("([^\n]*)\n") do
-        local bundle = line:match("^%s*%-%-%-%s*@bundle%s+(.-)%s*$")
-        if line:match("^%s*%-%-%-%s*@output") then
-            -- drop @output directive from output
-        elseif bundle then
-            local ok, res = pcall(process_bundle, src_root, bundle)
-            if not ok then
-                io.stderr:write("warning: skipping bundle '" .. bundle .. "': " .. res .. "\n")
-            else
-                result_lines[#result_lines + 1] = "-- [bundle: " .. bundle .. "]"
-                result_lines[#result_lines + 1] = res
-                result_lines[#result_lines + 1] = ""
-            end
+        -- Drop ---@bundle directives inside bundle files (not expanded)
+        if line:match("^%s*%-%-%-%s*@bundle") then
+            -- skip
         else
-            result_lines[#result_lines + 1] = line
+            local stripped = strip_comment(line)
+            lines[#lines + 1] = stripped
         end
     end
 
-    write_file(out_path, table.concat(result_lines, "\n"))
-    print("built:  " .. main_path .. " to " .. out_path)
-
-    -- deploy
-    local sub = output:match("^(.+)[/\\][^/\\]+$")
-    local dst_dir = deploy_root .. (sub and sub:gsub("/", "\\") .. "\\" or "")
-    local cmd = 'xcopy /Y "' .. out_path:gsub("/", "\\") .. '" "' .. dst_dir .. '"'
-    os.execute(cmd)
-    print("deploy: " .. out_path .. " to " .. dst_dir)
+    -- Join and trim surrounding blank lines
+    local result = table.concat(lines, "\n")
+    result = trim_blank_lines(result)
+    return result
 end
 
 -- ------------------------------------------------------------
 --  Main
 -- ------------------------------------------------------------
 
-local failed = false
-for _, src_root in ipairs(sources) do
-    local ok, e = pcall(build_source, src_root)
-    if not ok then
-        io.stderr:write("error building '" .. src_root .. "': " .. tostring(e) .. "\n")
-        failed = true
+local main_src = read_file(SRC)
+
+local output_parts = {}
+local consumed     = {}  -- track positions already replaced
+
+-- Split main_src into lines, process each
+local result_lines = {}
+
+for line in (main_src .. "\n"):gmatch("([^\n]*)\n") do
+    local bundle_path = line:match("^%s*%-%-%-%s*@bundle%s+(.-)%s*$")
+
+    if bundle_path then
+        -- Replace the ---@bundle line with the processed file contents
+        local ok, res = pcall(process_bundle, bundle_path)
+        if not ok then
+            io.stderr:write("warning: skipping bundle '" .. bundle_path .. "': " .. res .. "\n")
+        else
+            result_lines[#result_lines + 1] = "-- included from: " .. bundle_path
+            result_lines[#result_lines + 1] = res
+            result_lines[#result_lines + 1] = ""
+        end
+    else
+        result_lines[#result_lines + 1] = line
     end
 end
 
-if failed then
-    io.stderr:write("build finished with errors.\n")
-    os.exit(1)
-else
-    print("all builds complete.")
-end
+local final = table.concat(result_lines, "\n")
+
+write_file(OUT, final)
+print("build success: " .. OUT)
+
+local DEPLOY = "..\\ocelot\\boot\\init.lua"
+local xcopy_cmd = 'xcopy /Y "' .. OUT:gsub("/", "\\") .. '" "' .. DEPLOY:gsub("init.lua", "") .. '"'
+os.execute(xcopy_cmd)

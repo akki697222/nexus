@@ -2,6 +2,9 @@
 -- Released under the MIT license
 -- https://opensource.org/licenses/mit-license.php
 
+---@type service_manager
+local service_manager = {}
+
 ---@type table<string, service_entry>
 local services = {}
 
@@ -70,7 +73,7 @@ local function spawn_service(entry)
     entry.pid   = pid
     entry.state = "starting"
     pid_map[pid] = entry.def.id
-    log.info("Service '%s' starting (pid=%d)", entry.def.id, pid)
+    log.info("Service '%s' spawned (pid=%d)", entry.def.id, pid)
 end
 
 function service_manager.start(id)
