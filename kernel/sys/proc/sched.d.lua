@@ -29,6 +29,13 @@
 ---@field env          table<string, string> # Environment variables
 ---@field cwd          string                # Current working directory (e.g. "SYS://")
 ---@field detached     boolean               # If true, adopted by init on parent death
+---@field path         string?               # Path the process was spawned from
+---@field args         any[]                 # Spawn arguments
+---@field owned        table<cap_mt, true>   # Capabilities created by this process (revoked on death)
+---@field wait         { type: string?, deadline: number?, match: (fun(ev: event): boolean)? }? # Set while blocked in event.pull()
+---@field stdin        table?                # Standard streams (nil = system default)
+---@field stdout       table?
+---@field stderr       table?
 
 -- ------------------------------------------------------------
 --  Spawn options
@@ -39,6 +46,10 @@
 ---@field args      any[]?                 # Arguments passed to the process
 ---@field env       table<string, string>? # Environment variables (inherits parent if nil)
 ---@field detached  boolean?               # Detached mode (default: false)
+---@field cwd       string?                # Working directory (inherits parent if nil)
+---@field stdin     table?                 # Standard input stream (inherits parent if nil)
+---@field stdout    table?                 # Standard output stream (inherits parent if nil)
+---@field stderr    table?                 # Standard error stream (inherits parent if nil)
 
 -- ------------------------------------------------------------
 --  Scheduler API

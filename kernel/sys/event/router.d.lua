@@ -83,6 +83,29 @@ function router.subscribe(pid, filter) end
 ---@return nil
 function router.unsubscribe(pid) end
 
+---Start receiving input events (key_down, touch, clipboard, ...).
+---Input events are never broadcast; only watchers get them.
+---@param pid    integer
+---@param filter (fun(event: event): boolean)?  # Optional predicate (e.g. Ctrl+C only)
+---@return nil
+function router.watch_input(pid, filter) end
+
+---Take exclusive control of input events (compositor). Released automatically
+---when the process dies.
+---@param pid integer
+---@return nil
+function router.grab_input(pid) end
+
+---Give up the exclusive input grab.
+---@param pid integer
+---@return nil
+function router.release_input(pid) end
+
+---Stop receiving input events.
+---@param pid integer
+---@return nil
+function router.unwatch_input(pid) end
+
 ---Pop the next event from a process's event_queue.
 ---Returns nil if the queue is empty.
 ---@param pid integer

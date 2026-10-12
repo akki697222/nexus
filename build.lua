@@ -8,7 +8,7 @@
 --  and writes a single concatenated output file.
 -- ============================================================
 
-local SRC   = "src/main.lua"
+local SRC   = "kernel/main.lua"
 local OUT   = "build/init.lua"
 
 -- ------------------------------------------------------------
@@ -71,7 +71,7 @@ end
 ---@param path string
 ---@return string
 local function process_bundle(path)
-    path = "src/" .. path
+    path = "kernel/" .. path
     local content = read_file(path)
     local lines   = {}
 
@@ -126,6 +126,72 @@ local final = table.concat(result_lines, "\n")
 write_file(OUT, final)
 print("build success: " .. OUT)
 
-local DEPLOY = "..\\ocelot\\boot\\init.lua"
-local xcopy_cmd = 'xcopy /Y "' .. OUT:gsub("/", "\\") .. '" "' .. DEPLOY:gsub("init.lua", "") .. '"'
-os.execute(xcopy_cmd)
+-- ------------------------------------------------------------
+--  Deployment layout
+--
+--    Boot://    core system: what the kernel needs to bring the OS up
+--               (init.lua, Services/{storage,filesystem,module,driver,terminal})
+--    System://  user / semi-user space (/System on the boot disk):
+--               Exec/, Library/, Config/, Services/{init,compositor,selftest,...}
+-- ------------------------------------------------------------
+
+local DEPLOY_DIR = "../ocelot/boot"
+
+-- { source, destination }; destinations are relative to the volume root
+local BOOT_FILES = {
+    { "service/storage/storage.lua",       "Services/storage.lua" },
+    { "service/filesystem/filesystem.lua", "Services/filesystem.lua" },
+    { "service/module/module.lua",         "Services/module.lua" },
+    { "service/driver/driver.lua",         "Services/driver.lua" },
+    { "service/terminal/terminal.lua",     "Services/terminal.lua" },
+}
+
+local SYSTEM_FILES = {
+    { "service/init/init.lua",                     "Services/init.lua" },
+    { "service/compositor/compositor.lua",         "Services/compositor.lua" },
+    { "service/selftest/selftest.lua",             "Services/selftest.lua" },
+    { "service/selftest/selftest_child.lua",       "Services/selftest_child.lua" },
+    { "service/selftest/selftest_leak.lua",        "Services/selftest_leak.lua" },
+    { "service/selftest/selftest_exit.lua",        "Services/selftest_exit.lua" },
+    { "service/selftest/selftest_crashy.lua",      "Services/selftest_crashy.lua" },
+    { "Library/gui.lua",                           "Library/gui.lua" },
+    { "Library/lineedit.lua",                      "Library/lineedit.lua" },
+    { "Config/gui.lua",                            "Config/gui.lua" },
+}
+
+local BIN = {
+    "sh", "echo", "cat", "ls", "mkdir", "rm", "touch", "cp", "mv", "grep", "wc",
+    "ps", "kill", "free", "mounts", "devices", "clear", "uptime", "reboot",
+    "shutdown", "selftest", "lua", "edit", "gui", "guictl", "gui-panel", "gui-hello", "gui-term",
+}
+for _, name in ipairs(BIN) do
+    SYSTEM_FILES[#SYSTEM_FILES + 1] = { "Exec/" .. name .. ".lua", "Exec/" .. name .. ".lua" }
+end
+
+local function mkdir_for(path)
+    local dir = path:match("^(.*)/[^/]+$")
+    if dir then
+        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+    end
+end
+
+local function stage_and_deploy(list, stage_root, deploy_root)
+    for _, f in ipairs(list) do
+        local content = read_file(f[1])
+        local staged = stage_root .. "/" .. f[2]
+        mkdir_for(staged)
+        write_file(staged, content)
+        local dest = deploy_root .. "/" .. f[2]
+        mkdir_for(dest)
+        write_file(dest, content)
+        print("deployed: " .. dest)
+    end
+end
+
+mkdir_for("build/x")
+mkdir_for(DEPLOY_DIR .. "/x")
+write_file(DEPLOY_DIR .. "/init.lua", read_file(OUT))
+print("deployed: " .. DEPLOY_DIR .. "/init.lua")
+
+stage_and_deploy(BOOT_FILES,   "build/Boot",   DEPLOY_DIR)
+stage_and_deploy(SYSTEM_FILES, "build/System", DEPLOY_DIR .. "/System")

@@ -3,7 +3,7 @@
 -- https://opensource.org/licenses/mit-license.php
 
 ---@type capability
-local capability = {}
+capability = {}
 
 ---@type table<string, cap_def>
 local caps = {}
@@ -68,7 +68,7 @@ function capability.resolve_ops(def, ops)
     return resolved
 end
 
-function capability.create(id, ops)
+function capability.create(id, ops, ...)
     arg(1, id,  "string")
     arg(2, ops, "table", true)
 
@@ -80,7 +80,7 @@ function capability.create(id, ops)
     local resolved = capability.resolve_ops(def, ops)
 
     -- get full core from driver/service
-    local core = def.new()
+    local core = def.new(...)
 
     -- build filtered core containing only resolved ops
     local filtered = {}
@@ -96,7 +96,13 @@ function capability.create(id, ops)
     local mt = { __index = filtered }
 
     -- store mt → { core, def } for revocation
-    registry[mt] = { core = core, def = def }
+    local owner = scheduler.current()
+    registry[mt] = { core = core, def = def, owner = owner }
+    core._mt = mt   -- lets an op revoke its own capability (e.g. stream:close)
+
+    -- lifetime: revoked automatically when the creating process dies
+    local proc = process_manager.get(owner)
+    if proc then proc.owned[mt] = true end
 
     ---@type cap_obj
     local instance = setmetatable({}, mt)
@@ -113,8 +119,13 @@ function capability.revoke(mt)
     end
     -- invalidate all instances sharing this mt
     mt.__index = nil
+    local proc = process_manager.get(entry.owner)
+    if proc then proc.owned[mt] = nil end
     -- release driver/service resources
-    entry.def.dispose(entry.core)
+    local ok, err = pcall(entry.def.dispose, entry.core)
+    if not ok then
+        log.warn("capability dispose error: %s", tostring(err))
+    end
     registry[mt] = nil
 end
 
@@ -123,4 +134,69 @@ function capability.is_valid(instance)
     local mt = getmetatable(instance)
     if not mt then return false end
     return mt.__index ~= nil
+end
+
+-- ------------------------------------------------------------
+--  Device registry (driver_handle -> capability)
+-- ------------------------------------------------------------
+
+---@type table<string, { handle: table, mts: table<table, true> }>
+local devices = {}
+
+---Register a driver_handle (called by driver_service).
+function capability.register_device(handle)
+    arg(1, handle, "table")
+    devices[handle.addr] = { handle = handle, mts = {} }
+    log.info("Device registered: %s (%s)", handle.nexus_type, handle.addr:sub(1, 8))
+end
+
+---Create a capability for a registered device.
+---@param nexus_type string
+---@param ops (string|string[])[]|nil
+---@param addr string?  # pick a specific device (default: first of that type)
+function capability.open_device(nexus_type, ops, addr)
+    arg(1, nexus_type, "string")
+    arg(2, ops,  "table",  true)
+    arg(3, addr, "string", true)
+    local dev
+    if addr then
+        dev = devices[addr]
+        if dev and dev.handle.nexus_type ~= nexus_type then dev = nil end
+    else
+        local best
+        for a, d in pairs(devices) do
+            if d.handle.nexus_type == nexus_type and (not best or a < best) then
+                best, dev = a, d
+            end
+        end
+    end
+    if not dev then
+        return nil, "no '" .. nexus_type .. "' device available"
+    end
+    local cap, mt = capability.create(nexus_type, ops, dev.handle)
+    dev.mts[mt] = true
+    return cap, mt
+end
+
+---Revoke every capability of a device and forget it. Returns the handle.
+function capability.revoke_device(addr)
+    arg(1, addr, "string")
+    local dev = devices[addr]
+    if not dev then return nil end
+    devices[addr] = nil
+    local mts = {}
+    for mt in pairs(dev.mts) do
+        if registry[mt] then mts[#mts + 1] = mt end   -- skip already-disposed ones
+    end
+    for _, mt in ipairs(mts) do
+        capability.revoke(mt)
+    end
+    log.info("Device revoked: %s (%s), %d capabilities", dev.handle.nexus_type, addr:sub(1, 8), #mts)
+    return dev.handle
+end
+
+function capability.list_devices()
+    local out = {}
+    for addr, d in pairs(devices) do out[addr] = d.handle end
+    return out
 end

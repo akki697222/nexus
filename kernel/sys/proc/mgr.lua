@@ -3,7 +3,7 @@
 -- https://opensource.org/licenses/mit-license.php
 
 ---@type process_manager
-local process_manager = {}
+process_manager = {}
 
 ---@type table<integer, process>
 local processes = {}
@@ -18,12 +18,26 @@ local function alloc_pid()
 end
 
 local function load_file(path)
+    -- "Boot://" is the boot device itself: always readable without the VFS
+    local boot_rel = path:match("^Boot://(.*)$")
+    local display_path = path
+    if boot_rel then
+        path = "/" .. boot_rel
+    end
+    -- other "Alias://..." paths go through the VFS once it is up
+    if not boot_rel and fs and path:match("^[%w_%-]+://") then
+        local data, err = fs.read_file(path)
+        if not data then
+            error("failed to open '" .. path .. "': " .. tostring(err))
+        end
+        return data
+    end
     -- Phase 1: use OC raw fs component directly (VFS not yet available)
     -- TODO: replace with fs.open() after filesystem_service is up
     local addr = computer.getBootAddress()
     local handle, err = component.invoke(addr, "open", path, "r")
     if not handle then
-        error("failed to open '" .. path .. "': " .. tostring(err))
+        error("failed to open '" .. display_path .. "': " .. tostring(err))
     end
     local buf = {}
     while true do
@@ -60,15 +74,21 @@ function process_manager.spawn(opts)
     ---@type process
     local proc = {
         pid         = pid,
+        path        = opts.path,
         parent      = parent_pid,
         children    = {},
         coroutine   = coroutine.create(fn),
         state       = "running",
         caps        = caps,
+        owned       = {},
         event_queue = {},
         env         = opts.env or (parent and parent.env or {}),
-        cwd         = parent and parent.cwd or "SYS://",
+        cwd         = opts.cwd or (parent and parent.cwd) or "System://",
+        stdin       = opts.stdin  or (parent and parent.stdin),
+        stdout      = opts.stdout or (parent and parent.stdout),
+        stderr      = opts.stderr or (parent and parent.stderr),
         detached    = opts.detached or false,
+        args        = opts.args or {},
     }
 
     processes[pid] = proc
@@ -80,24 +100,22 @@ function process_manager.spawn(opts)
     scheduler.register(proc)
     router.subscribe(pid)
 
-    -- push a bootstrap event so the process gets resumed on the first tick
-    router.push_to(pid, { type = "process_spawned", pid = pid })
-
     log.info("Process %d spawned (parent=%d, path=%s)", pid, parent_pid, opts.path)
 
     return pid
 end
 
-function process_manager.kill(pid, reason)
+function process_manager.kill(pid, reason, code)
     arg(1, pid,    "number")
     arg(2, reason, "string", true)
+    arg(3, code,   "number", true)
     reason = reason or "killed"
 
     local proc = processes[pid]
     if not proc then return end
 
     -- recursively kill or re-parent children
-    for _, child_pid in ipairs(proc.children) do
+    for _, child_pid in ipairs({ table.unpack(proc.children) }) do
         local child = processes[child_pid]
         if child then
             if child.detached then
@@ -108,12 +126,21 @@ function process_manager.kill(pid, reason)
         end
     end
 
+    local parent_proc = processes[proc.parent]
+    if parent_proc then
+        for i, c in ipairs(parent_proc.children) do
+            if c == pid then table.remove(parent_proc.children, i) break end
+        end
+    end
+
     proc.state = "dead"
     scheduler.unregister(pid)
     router.unsubscribe(pid)
 
-    -- revoke all owned capabilities
-    for _, mt in pairs(proc.caps) do
+    -- revoke capabilities created by this process (inherited ones stay valid)
+    local owned = {}
+    for mt in pairs(proc.owned) do owned[#owned + 1] = mt end
+    for _, mt in ipairs(owned) do
         capability.revoke(mt)
     end
 
@@ -123,16 +150,34 @@ function process_manager.kill(pid, reason)
         type   = "process_died",
         pid    = pid,
         reason = reason,
+        code   = code,
     })
 
-    log.info("Process %d terminated (%s)", pid, reason)
+    log.info("Process %d terminated (%s%s)", pid, reason, code and (", code=" .. code) or "")
 end
 
 function process_manager.reap(pid, reason, code)
     arg(1, pid,    "number")
     arg(2, reason, "string")
     arg(3, code,   "number", true)
-    process_manager.kill(pid, reason)
+    process_manager.kill(pid, reason, code)
+end
+
+---Terminate the calling process with an exit code (does not return).
+function process_manager.exit(code)
+    arg(1, code, "number", true)
+    error({ nexus_exit = code or 0 }, 0)
+end
+
+---Block the calling process until `pid` dies. Returns its exit code,
+---or nil, "timeout" / "gone".
+function process_manager.wait(pid, timeout)
+    arg(1, pid,     "number")
+    arg(2, timeout, "number", true)
+    if not processes[pid] then return nil, "gone" end
+    local ev = event.pull("process_died", timeout, function(e) return e.pid == pid end)
+    if not ev then return nil, "timeout" end
+    return ev.code or (ev.reason == "exit" and 0 or nil), ev.reason
 end
 
 function process_manager.get(pid)

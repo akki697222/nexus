@@ -27,6 +27,7 @@
 ---| '"starting"'  # Spawned, waiting for ready signal
 ---| '"running"'   # Fully started and operational
 ---| '"crashed"'   # Terminated unexpectedly, pending restart
+---| '"pending"'   # Waiting for dependencies to become running
 
 ---@class service_entry
 ---@field def     service_def

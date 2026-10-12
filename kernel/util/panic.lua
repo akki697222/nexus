@@ -3,7 +3,15 @@
 -- https://opensource.org/licenses/mit-license.php
 
 function panic(reason)
-    local gpu = component.proxy(component.list("gpu")())
+    reason = tostring(reason)
+
+    if log and log.panic then
+        pcall(log.panic, "PANIC: %s", reason)
+        pcall(log.flush)
+    end
+
+    local addr = component.list("gpu")()
+    local gpu  = addr and component.proxy(addr)
     if gpu then
         gpu.setBackground(0xFF0000)
         gpu.setForeground(0xFFFFFF)
@@ -11,12 +19,13 @@ function panic(reason)
         gpu.fill(1, 1, w, h, " ")
         gpu.set(1, 1, "Panic!")
         local l = 1
-        for text in tostring(reason):gsub("\t", "    "):gsub("\r", ""):gmatch("[^\n]+") do
+        for text in reason:gsub("\t", "    "):gsub("\r", ""):gmatch("[^\n]+") do
             while #text > 0 do
                 local line = text:sub(1, w)
 
                 text = text:sub(#line + 1)
                 l = l + 1
+                if l > h then break end
 
                 gpu.set(1, l, line)
             end
@@ -25,7 +34,16 @@ function panic(reason)
     for _ = 0, 2 do
         computer.beep()
     end
+    if gpu then
+        local _, h = gpu.getResolution()
+        gpu.set(1, h, "Press any key to reboot")
+    end
+    -- stay visible until a key press (debuggable); pullSignal keeps the VM
+    -- from tripping "too long without yielding".
     while true do
-        coroutine.yield()
+        local sig = computer.pullSignal(1)
+        if sig == "key_down" then
+            computer.shutdown(true)
+        end
     end
 end

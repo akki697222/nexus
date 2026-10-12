@@ -3,13 +3,52 @@
 -- https://opensource.org/licenses/mit-license.php
 
 ---@type router
-local router = {}
+router = {}
 
 ---@type event[]
 local bus = {}
 
 ---@type table<integer, { filter: event_filter? }>
 local subscribers = {}
+
+-- per-process queue cap (OC RAM is small; unread broadcasts must not pile up)
+local MAX_QUEUE = 256
+
+-- Input events (keyboard / pointer) are NOT broadcast: only processes that
+-- asked for them with router.watch_input() receive them, so a program reading
+-- the keyboard does not leak its keystrokes into other processes' queues.
+local INPUT_TYPES = {
+    key_down = true, key_up = true, clipboard = true,
+    touch = true, drag = true, drop = true, scroll = true,
+}
+
+---@type table<integer, fun(ev: event): boolean>|true
+local input_watchers = {}
+local input_grab = nil
+
+---Receive input events. `filter` (optional) narrows them, e.g. Ctrl+C only.
+function router.watch_input(pid, filter)
+    arg(1, pid,    "number")
+    arg(2, filter, "function", true)
+    input_watchers[pid] = filter or true
+end
+
+---Exclusive input: while a process holds the grab (e.g. the compositor),
+---only it receives input events; watchers get nothing.
+function router.grab_input(pid)
+    arg(1, pid, "number")
+    input_grab = pid
+end
+
+function router.release_input(pid)
+    arg(1, pid, "number")
+    if input_grab == pid then input_grab = nil end
+end
+
+function router.unwatch_input(pid)
+    arg(1, pid, "number")
+    input_watchers[pid] = nil
+end
 
 function router.push(ev)
     arg(1, ev, "table")
@@ -20,6 +59,19 @@ function router.dispatch()
     local pending = bus
     bus = {}
     for _, ev in ipairs(pending) do
+        event._emit(ev)
+        if INPUT_TYPES[ev.type] then
+            if input_grab and subscribers[input_grab] then
+                router.push_to(input_grab, ev)
+            else
+                for pid, f in pairs(input_watchers) do
+                    if subscribers[pid] and (f == true or f(ev)) then
+                        router.push_to(pid, ev)
+                    end
+                end
+            end
+            goto continue
+        end
         for pid, sub in pairs(subscribers) do
             local f = sub.filter
             if not f then
@@ -32,6 +84,7 @@ function router.dispatch()
                 router.push_to(pid, ev)
             end
         end
+        ::continue::
     end
 end
 
@@ -43,6 +96,8 @@ end
 
 function router.unsubscribe(pid)
     arg(1, pid, "number")
+    input_watchers[pid] = nil
+    if input_grab == pid then input_grab = nil end
     subscribers[pid] = nil
 end
 
@@ -69,12 +124,21 @@ function router.push_to(pid, ev)
     arg(2, ev,  "table")
     local proc = process_manager.get(pid)
     if not proc then return end
-    proc.event_queue[#proc.event_queue + 1] = ev
+    local q = proc.event_queue
+    if #q >= MAX_QUEUE then
+        table.remove(q, 1)
+        if not proc.overflow_warned then
+            proc.overflow_warned = true
+            log.warn("event queue overflow for pid %d, dropping oldest events", pid)
+        end
+    end
+    q[#q + 1] = ev
     scheduler.wake(pid)
 end
 
 function router.broadcast(ev)
     arg(1, ev, "table")
+    event._emit(ev)
     for pid in pairs(subscribers) do
         router.push_to(pid, ev)
     end

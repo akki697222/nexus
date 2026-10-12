@@ -90,8 +90,9 @@ function capability.resolve_ops(def, ops) end
 ---All instances sharing the same mt are revoked together via capability.revoke().
 ---@param id  string
 ---@param ops (string|string[])[]|nil
+---@param ... any  # Extra arguments forwarded to cap_def.new()
 ---@return cap_obj, cap_mt  # Returns both the instance and its shared mt for revocation.
-function capability.create(id, ops) end
+function capability.create(id, ops, ...) end
 
 ---Revoke a capability by invalidating its shared metatable.
 ---Sets mt.__index = nil, immediately invalidating all cap_obj instances

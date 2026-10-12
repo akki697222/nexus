@@ -3,7 +3,7 @@
 -- https://opensource.org/licenses/mit-license.php
 
 ---@type service_manager
-local service_manager = {}
+service_manager = {}
 
 ---@type table<string, service_entry>
 local services = {}
@@ -29,6 +29,13 @@ function service_manager.get(id)
     return services[id]
 end
 
+function service_manager.all_running()
+    for _, entry in pairs(services) do
+        if entry.state ~= "running" then return false end
+    end
+    return true
+end
+
 function service_manager.is_running(id)
     arg(1, id, "string")
     local entry = services[id]
@@ -45,24 +52,23 @@ function service_manager.ready(id)
     if entry.state == "starting" then
         entry.state = "running"
         log.info("Service '%s' is ready", id)
+        router.broadcast({ type = "service_ready", id = id })
+        if service_manager.all_running() then
+            router.broadcast({ type = "all_services_ready" })
+        end
+        service_manager._start_pending()
     end
 end
 
-local function wait_for_deps(def)
-    if not def.deps then return end
-    for _, dep_id in ipairs(def.deps) do
-        local entry = services[dep_id]
-        if not entry then
+local function deps_running(def)
+    for _, dep_id in ipairs(def.deps or {}) do
+        local dep = services[dep_id]
+        if not dep then
             error("service '" .. def.id .. "' depends on unknown service '" .. dep_id .. "'")
         end
-        -- block until dep transitions to "running"
-        while entry.state ~= "running" do
-            if entry.state == "stopped" then
-                error("dependency '" .. dep_id .. "' is stopped, cannot start '" .. def.id .. "'")
-            end
-            scheduler.sleep(0.05)
-        end
+        if dep.state ~= "running" then return false end
     end
+    return true
 end
 
 local function spawn_service(entry)
@@ -76,6 +82,8 @@ local function spawn_service(entry)
     log.info("Service '%s' spawned (pid=%d)", entry.def.id, pid)
 end
 
+-- Never blocks: a service whose dependencies are not running yet is marked
+-- "pending" and spawned from ready() once they are.
 function service_manager.start(id)
     arg(1, id, "string")
     local entry = services[id]
@@ -86,8 +94,20 @@ function service_manager.start(id)
         log.warn("Service '%s' is already running", id)
         return
     end
-    wait_for_deps(entry.def)
-    spawn_service(entry)
+    if deps_running(entry.def) then
+        spawn_service(entry)
+    else
+        entry.state = "pending"
+        log.info("Service '%s' waiting for dependencies", id)
+    end
+end
+
+function service_manager._start_pending()
+    for _, entry in pairs(services) do
+        if entry.state == "pending" and deps_running(entry.def) then
+            spawn_service(entry)
+        end
+    end
 end
 
 local function resolve_order()
@@ -125,11 +145,20 @@ function service_manager.stop(id)
     arg(1, id, "string")
     local entry = services[id]
     if not entry or not entry.pid then return end
-    process_manager.kill(entry.pid, "stopped")
-    pid_map[entry.pid] = nil
+    local pid = entry.pid
+    pid_map[pid] = nil
+    process_manager.kill(pid, "stopped")
     entry.pid   = nil
     entry.state = "stopped"
     log.info("Service '%s' stopped", id)
+end
+
+---Stop and forget a service (used for runtime-registered services).
+function service_manager.unregister(id)
+    arg(1, id, "string")
+    if not services[id] then return end
+    service_manager.stop(id)
+    services[id] = nil
 end
 
 function service_manager.on_process_died(pid)
@@ -146,7 +175,21 @@ function service_manager.on_process_died(pid)
         panic("Core service '" .. id .. "' crashed")
     end
 
-    log.warn("Service '%s' crashed, restarting...", id)
+    -- give up after 5 crashes within 30s (crash loop)
+    local now = computer.uptime()
+    local recent = {}
+    for _, t in ipairs(entry.crashes or {}) do
+        if now - t < 30 then recent[#recent + 1] = t end
+    end
+    recent[#recent + 1] = now
+    entry.crashes = recent
+    if #recent > 5 then
+        entry.state = "failed"
+        log.error("Service '%s' is crash-looping, giving up", id)
+        return
+    end
+
+    log.warn("Service '%s' crashed (pid=%d), restarting...", id, pid)
     timer.after(1.0, function()
         local ok, err = pcall(service_manager.start, id)
         if not ok then

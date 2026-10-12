@@ -35,7 +35,7 @@ function storage.mount(addr, alias) end
 function storage.unmount(alias) end
 
 ---Resolve a drive-alias path to an internal /Volumes/ path.
----e.g. "System://bin/shell.lua" → "/Volumes/<addr>/bin/shell.lua"
+---e.g. "System://Exec/shell.lua" → "/Volumes/<addr>/System/Exec/shell.lua"
 ---Errors if the alias is not mounted.
 ---@param path string
 ---@return string

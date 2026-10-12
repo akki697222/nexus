@@ -3,7 +3,7 @@
 -- https://opensource.org/licenses/mit-license.php
 
 ---@type ipc
-local ipc = {}
+ipc = {}
 
 function ipc.send(pid, data)
     arg(1, pid,  "number")

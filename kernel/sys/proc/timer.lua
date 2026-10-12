@@ -3,7 +3,7 @@
 -- https://opensource.org/licenses/mit-license.php
 
 ---@type timer
-local timer = {}
+timer = {}
 
 ---@type timer_handle[]
 local pending = {}
