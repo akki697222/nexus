@@ -25,7 +25,7 @@ function thread.create(thread_proc, ...)
 end
 
 function thread.waitForAll(threads, timeout)
-    local deadline = timeout and (hal.uptime() + timeout) or math.huge
+    local deadline = timeout and (computer.uptime() + timeout) or math.huge
     while true do
         local all_dead = true
         for _, t in ipairs(threads) do
@@ -36,7 +36,7 @@ function thread.waitForAll(threads, timeout)
         end
         if all_dead then return true end
 
-        if hal.uptime() > deadline then
+        if computer.uptime() > deadline then
             return false, "timeout"
         end
 
@@ -45,7 +45,7 @@ function thread.waitForAll(threads, timeout)
 end
 
 function thread.waitForAny(threads, timeout)
-    local deadline = timeout and (hal.uptime() + timeout) or math.huge
+    local deadline = timeout and (computer.uptime() + timeout) or math.huge
     while true do
         for _, t in ipairs(threads) do
             if t:status() == "dead" then
@@ -53,7 +53,7 @@ function thread.waitForAny(threads, timeout)
             end
         end
 
-        if hal.uptime() > deadline then
+        if computer.uptime() > deadline then
             return false, "timeout"
         end
 

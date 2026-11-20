@@ -7,7 +7,6 @@ properties.buildVersion = "0.1.1"
 -- include settings
 properties.includeDir = "src"
 properties.includes = {
-    "arch/oc/hal.lua",
     "base.lua",
     "sha2.lua",
     "util.lua",

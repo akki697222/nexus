@@ -65,6 +65,17 @@ function devfs.attributes(name)
     return entry.vnode
 end
 
+-- Internal detach path. Existing open handles retain their descriptions.
+function devfs.unregister(name)
+    local entry = devices[name]
+    if not entry then return end
+    devices[name] = nil
+    local node = entry.vnode
+    if node and node.parent and node.parent.children[node.hash] == node then
+        node.parent.children[node.hash] = nil
+    end
+end
+
 function devfs.spaceUsed() return 0 end
 
 function devfs.spaceTotal() return 0 end

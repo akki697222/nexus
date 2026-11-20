@@ -87,7 +87,7 @@ function event.register(key, callback, interval, times, opt_handlers)
         interval = interval or math.huge,
         times = times or 1,
         background = false,
-        timeout = hal.uptime() + interval or math.huge
+        timeout = computer.uptime() + interval or math.huge
     }
 
     opt_handlers = opt_handlers or handlers
@@ -157,7 +157,7 @@ end
 
 local function dispatch_handlers(ev)
     local sig = ev[1]
-    local now = hal.uptime()
+    local now = computer.uptime()
 
     ---@type event_handler[]
     local copy = {}
@@ -209,7 +209,7 @@ function event.pullFiltered(...)
         filter = args[2]
     end
 
-    local deadline = hal.uptime() + (seconds or math.huge)
+    local deadline = computer.uptime() + (seconds or math.huge)
 
     repeat
         local ev = wait_event()
@@ -219,7 +219,7 @@ function event.pullFiltered(...)
                 return table.unpack(ev, 1, ev.n)
             end
         end
-    until hal.uptime() >= deadline
+    until computer.uptime() >= deadline
 end
 
 function event.pull(...)

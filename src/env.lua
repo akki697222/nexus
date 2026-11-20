@@ -193,7 +193,7 @@ local function newApis(tier)
         system     = systemapi,
         user       = newUserApi(),
         group      = functions(group),
-        device     = functions(device),
+        device     = functions(device, { init = true, handleEvent = true, register = true }),
         util       = {
             encodeTable = util.encodeTable,
             copyTable = util.copyTable,

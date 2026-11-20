@@ -24,7 +24,7 @@ def("/meminfo", function()
 end)
 
 def("/uptime", function()
-    local up = hal.uptime()
+    local up = computer.uptime()
     return string.format("%.2f %.2f\n", up, up * 0.9)
 end)
 
@@ -201,7 +201,7 @@ function procfs.size(path)
 end
 
 function procfs.lastModified(path)
-    return math.floor(hal.uptime() * 1000)
+    return math.floor(computer.uptime() * 1000)
 end
 
 function procfs.makeDirectory(path)

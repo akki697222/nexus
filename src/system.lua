@@ -107,7 +107,7 @@ function system.finishShutdown()
         return nil, err
     end
 
-    local called, result, reason = pcall(hal.shutdown, reboot)
+    local called, result, reason = pcall(computer.shutdown, reboot)
     if not called or result == false or (result == nil and reason ~= nil) then
         metadata_sync_stopping = false
         shutdown_request = nil

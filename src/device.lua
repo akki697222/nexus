@@ -2,6 +2,22 @@
 local device = {}
 ---@type table<string, device_manifest>
 local system_devices = {}
+local deviceNodes = {}
+local nextIndex = { volume = 0, floppy = 0 }
+local nodePrefixes = { volume = "hd", floppy = "fd" }
+
+local function publish(id, entry)
+    local prefix = nodePrefixes[entry.type]
+    if not prefix or deviceNodes[id] then return end
+    local name = prefix .. nextIndex[entry.type]
+    -- Managed volumes are mounted through the VFS, so these nodes carry an
+    -- identity but have no raw read or write methods.
+    local ok = devfs.create(name, { address = id }, true, 0600)
+    if ok then
+        deviceNodes[id] = name
+        nextIndex[entry.type] = nextIndex[entry.type] + 1
+    end
+end
 
 ---@alias device_type
 ---| '"volume"'
@@ -45,6 +61,7 @@ local system_devices = {}
 ---@class device_manifest_system : device_manifest
 ---@field capacity string
 
+-- OC's device inventory is normalized before it is exposed to userland.
 local function format_clock(clock_str)
     if not clock_str then return "?MHz" end
     local raw_clock = clock_str:match("([^%+]+)")
@@ -54,7 +71,7 @@ local function format_clock(clock_str)
 end
 
 ---@return device_manifest
-local function wrap(addr, obj)
+local function describeOcDevice(addr, obj)
     ---@type device_manifest
     local base = {
         addr = addr,
@@ -112,45 +129,39 @@ local function wrap(addr, obj)
 end
 
 function device.init()
-    for addr, obj in pairs(computer.getDeviceInfo()) do
-        system_devices[addr] = wrap(addr, obj)
+    for id, info in pairs(computer.getDeviceInfo()) do
+        system_devices[id] = describeOcDevice(id, info)
     end
-    event.listenBackground(true)
-    event.listen("component_added", function (name, addr, type)
-        local obj = computer.getDeviceInfo()[addr]
-        if obj then
-            print("device '" .. addr .. "' added (" .. type .. ")")
-            system_devices[addr] = wrap(addr, obj)
+end
+
+function device.handleEvent(name, id)
+    if name == "component_added" then
+        local info = computer.getDeviceInfo()[id]
+        if not info then return end
+        local entry = describeOcDevice(id, info)
+        system_devices[id] = entry
+        publish(id, entry)
+    elseif name == "component_removed" then
+        system_devices[id] = nil
+        if deviceNodes[id] then
+            devfs.unregister(deviceNodes[id])
+            deviceNodes[id] = nil
         end
-    end)
-    event.listen("component_removed", function (name, addr, type)
-        print("device '" .. addr .. "' removed (" .. type .. ")")
-        system_devices[addr] = nil
-    end)
+    end
 end
 
 function device.register()
-    local counts = {
-        volume = 0,
-        floppy = 0
-    }
-    for addr, dev in pairs(system_devices) do
-        -- block nodes carry no I/O methods: volume contents are only
-        -- reachable through the VFS, never through the backing component
-        local node = { address = addr }
-        if dev.type == "volume" then
-            devfs.create("hd" .. counts.volume, node, true, 0600)
-            counts.volume = counts.volume + 1
-        elseif dev.type == "floppy" then
-            devfs.create("fd" .. counts.floppy, node, true, 0600)
-            counts.floppy = counts.floppy + 1
-        end
-    end
+    local ids = {}
+    for id in pairs(system_devices) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do publish(id, system_devices[id]) end
 end
 
 ---@return table<string, device_manifest> # address = manifest
 function device.list()
-    return system_devices
+    local result = {}
+    for id, entry in pairs(system_devices) do result[id] = util.copyTable(entry) end
+    return result
 end
 
 ---@param type device_type
@@ -158,11 +169,12 @@ end
 function device.getFromType(type)
     for _, dev in pairs(system_devices) do
         if dev.type == type then
-            return dev
+            return util.copyTable(dev)
         end
     end
 end
 
 function device.get(addr)
-    return system_devices[addr]
+    local entry = system_devices[addr]
+    if entry then return util.copyTable(entry) end
 end

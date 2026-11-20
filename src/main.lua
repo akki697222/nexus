@@ -38,24 +38,27 @@ local function main()
     -- boot message
     printk("Nexus version " .. _OSVERSIONSTRING)
     local cpu = device.getFromType("processor") --[[@as device_manifest_cpu]]
-    printk(computer.getArchitecture() .. "/CPU: " .. cpu.vendor .. " " .. cpu.product .. " @ " .. cpu.clock)
+    if cpu then
+        printk(computer.getArchitecture() .. "/CPU: " .. cpu.vendor .. " " .. cpu.product .. " @ " .. cpu.clock)
+    end
     local total_kb = math.floor(computer.totalMemory() / 1024)
     local free_kb = math.floor(computer.freeMemory() / 1024)
     local used_kb = total_kb - free_kb
     printk("Memory: " .. free_kb .. "KB/" .. total_kb .. "KB available (" .. used_kb .. "KB reserved)")
-    for addr, dev in pairs(system_devices) do
-        printk("component [" .. addr .. "] " .. dev.product .. " (" .. dev.desc .. ")")
+    for addr, dev in pairs(device.list()) do
+        printk("device [" .. addr .. "] " .. dev.product .. " (" .. dev.desc .. ")")
     end
 
     -- Mount root
     do
-        local s, e = vfs.mount(computer.getBootAddress(), "/")
+        local boot = computer.getBootAddress()
+        local s, e = vfs.mount(boot, "/")
         if not s then
             printk("mount: " .. e)
-            panic("not syncing", "VFS: unable to mount root fs on " .. computer.getBootAddress())
+            panic("not syncing", "VFS: unable to mount root fs on " .. tostring(boot))
         end
+        printk("VFS: Mounted root fs on device " .. tostring(boot) .. ".")
     end
-    printk("VFS: Mounted root fs on device " .. computer.getBootAddress() .. ".")
     do
         local s, e = vfs.mount(computer.tmpAddress(), "/tmp")
         if not s then
@@ -93,16 +96,16 @@ local function main()
 
     system.createKernelThread(function()
         local SAVE_INTERVAL = 1
-        local last_save = hal.uptime()
+        local last_save = computer.uptime()
         while true do
-            if vfs._dirty and hal.uptime() - last_save >= SAVE_INTERVAL then
+            if vfs._dirty and computer.uptime() - last_save >= SAVE_INTERVAL then
                 local ok, err = system._syncMetadata(function()
                     return vfs.saveMetadata(coroutine.yield)
                 end)
                 if not ok and err ~= "Metadata sync is stopping" then
                     printk("vfs: metadata sync failed: " .. tostring(err))
                 end
-                last_save = hal.uptime()
+                last_save = computer.uptime()
             end
             coroutine.yield()
         end
@@ -117,21 +120,20 @@ local function main()
 
     device.register()
 
-    --[[
-do
-    local f = vfs.open("/fuck", "w")
-    f:write(util.encodeTable(computer.getDeviceInfo()))
-    f:close()
-end
-]]
-
-    -- set boot time
     do
-        local proxy, path = component.proxy(computer.tmpAddress()), "timestamp"
-        if proxy then
-            proxy.close(proxy.open(path, "wb"))
-            bootRealTime = math.floor(proxy.lastModified(path) / 1000)
-            proxy.remove(path)
+        local ok, timestamp = pcall(function()
+            local volume = component.proxy(computer.tmpAddress())
+            if not volume then return end
+            local path = "/.nexus-boot-clock"
+            local handle = volume.open(path, "wb")
+            if not handle then return end
+            volume.close(handle)
+            local modified = volume.lastModified(path)
+            volume.remove(path)
+            return modified
+        end)
+        if ok and type(timestamp) == "number" and timestamp > 0 then
+            bootRealTime = math.floor(timestamp / 1000)
         end
     end
 
@@ -249,8 +251,9 @@ end
 
     -- kernel main event loop
     while true do
-        local ev = table.pack(hal.pullEvent(0.05))
+        local ev = table.pack(computer.pullSignal(0.05))
         if ev.n > 0 then
+            device.handleEvent(ev[1], ev[2])
             event.dispatch(ev)
         end
 
