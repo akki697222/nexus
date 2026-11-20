@@ -18,7 +18,7 @@ log_buffer = setmetatable({}, {
 })
 bootRealTime = 0
 getRealTime = function()
-    return bootRealTime + computer.uptime()
+    return bootRealTime + hal.uptime()
 end
 
 ---@type onix_config
@@ -41,7 +41,7 @@ _OSVERSION = config.version.id
 _OSVERSIONSTRING = config.version.ver
 _OSDIST = config.version.dist
 _OSNAME = config.version.name
-_MACHINE = "OpenComputers (" .. computer.getArchitecture() .. ")"
+_MACHINE = hal.platform .. " (" .. computer.getArchitecture() .. ")"
 
 ---@param env? table
 loadfile = function(file, env) end

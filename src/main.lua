@@ -93,16 +93,16 @@ local function main()
 
     system.createKernelThread(function()
         local SAVE_INTERVAL = 1
-        local last_save = computer.uptime()
+        local last_save = hal.uptime()
         while true do
-            if vfs._dirty and computer.uptime() - last_save >= SAVE_INTERVAL then
+            if vfs._dirty and hal.uptime() - last_save >= SAVE_INTERVAL then
                 local ok, err = system._syncMetadata(function()
                     return vfs.saveMetadata(coroutine.yield)
                 end)
                 if not ok and err ~= "Metadata sync is stopping" then
                     printk("vfs: metadata sync failed: " .. tostring(err))
                 end
-                last_save = computer.uptime()
+                last_save = hal.uptime()
             end
             coroutine.yield()
         end
@@ -249,7 +249,7 @@ end
 
     -- kernel main event loop
     while true do
-        local ev = table.pack(computer.pullSignal(0.05))
+        local ev = table.pack(hal.pullEvent(0.05))
         if ev.n > 0 then
             event.dispatch(ev)
         end

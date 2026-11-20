@@ -123,7 +123,7 @@ printd = function(...)
 end
 
 printk = function(...)
-    write(string.format("[%8.2f] %s\n", computer.uptime(), tostring(... or "")))
+    write(string.format("[%8.2f] %s\n", hal.uptime(), tostring(... or "")))
 end
 
 panic = function(err, reason)
@@ -139,7 +139,7 @@ panic = function(err, reason)
             computer.beep()
         end
         while true do
-            computer.pullSignal()
+            hal.pullEvent()
         end
     else
         local header = "Kernel panic - " .. err .. ": " .. reason
@@ -162,7 +162,7 @@ panic = function(err, reason)
         runProcessQueue({})
         resumeKernelThreads()
         while true do
-            computer.pullSignal()
+            hal.pullEvent()
         end
     end
 end
