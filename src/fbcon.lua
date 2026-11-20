@@ -103,13 +103,8 @@ function fbcon.getSize()
 end
 
 write = function(...)
-    local proc = process.getCurrent()
-    if proc ~= nil then
-        local stdout = proc.fd[2].fd
-        vfs.write(stdout, ...)
-    else
-        vfs.write(1, ...)
-    end
+    -- fd 1 of the calling process, or the console in kernel context
+    vfs.write(1, ...)
 end
 
 print = function(...)

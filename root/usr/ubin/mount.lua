@@ -32,13 +32,13 @@ local function print_mounts()
     -- for each mount
     local mounts = {}
 
-    for proxy, path in fs.mounts() do
+    for info, path in fs.mounts() do
         local device = {}
 
-        device.dev_path = proxy.address
+        device.dev_path = info.address or info.label or "none"
         device.mount_path = path
-        device.rw_ro = proxy.isReadOnly() and "ro" or "rw"
-        device.fs_label = proxy.getLabel() or proxy.address
+        device.rw_ro = info.readOnly and "ro" or "rw"
+        device.fs_label = info.label or device.dev_path
 
         mounts[device.dev_path] = mounts[device.dev_path] or {}
         local dev_mounts = mounts[device.dev_path]
@@ -67,14 +67,8 @@ local function print_mounts()
 end
 
 local function do_mount()
-    -- bind converts a path to a proxy
-    local proxy, reason = fs.proxy(args[1], opts)
-    if not proxy then
-        io.stderr:write("Failed to mount: ", tostring(reason), "\n")
-        os.exit(1)
-    end
-
-    local result, mount_failure = fs.mount(proxy, shell.resolve(args[2]))
+    -- device is a filesystem label or address
+    local result, mount_failure = fs.mount(args[1], shell.resolve(args[2]))
     if not result then
         io.stderr:write(mount_failure, "\n")
         os.exit(2) -- error code

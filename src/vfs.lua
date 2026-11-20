@@ -1,5 +1,9 @@
 ---@class vfs : openos_fs
 vfs = {}
+-- Kernel-only vnode access. A chunk-level local: other kernel sources see it,
+-- but it is never part of the `vfs` table handed to userland and modules,
+-- which must not obtain vnodes (their .fs is a raw filesystem proxy).
+local vfsk = {}
 ---@type table<integer, vnode>
 local vtab = {}
 ---@type table<string, vfs_descriptor>
@@ -30,13 +34,13 @@ local devfs
 ---@field fd integer
 
 ---@alias vtype
----| '"VREG"'  # 通常ファイル (regular file)
----| '"VDIR"'  # ディレクトリ (directory)
----| '"VCHR"'  # キャラクターデバイス (character device)
----| '"VBLK"'  # ブロックデバイス (block device)
----| '"VFIFO"' # FIFO (名前付きパイプ)
----| '"VSOCK"' # ソケット (socket)
----| '"VLNK"'  # シンボリックリンク (symbolic link)
+---| '"VREG"'  # Regular File
+---| '"VDIR"'  # Directory
+---| '"VCHR"'  # Character Device (like terminal)
+---| '"VBLK"'  # Block Device (like filesystem)
+---| '"VFIFO"' # FIFO (named pipe)
+---| '"VSOCK"' # Socket
+---| '"VLNK"'  # Symlink
 
 ---@alias fs_mode
 ---| '"r"'
@@ -108,6 +112,171 @@ local function getFsRelativePath(node)
     return "/" .. table.concat(parts, "/")
 end
 
+local loadDirMetadata
+
+---@param dir vnode
+---@param name string
+---@return vnode|nil
+local function findChild(dir, name)
+    local node = dir.children[fnv1a_hash(name)]
+    if node and node.name == name then return node end
+    for _, n in pairs(dir.children) do
+        if n.name == name then return n end
+    end
+end
+
+-- Populates `dir` from its backing filesystem on first access, one level at
+-- a time, instead of scanning the whole disk into memory at mount time.
+---@param dir vnode
+local function ensureLoaded(dir)
+    if dir.loaded ~= false then return end
+    dir.loaded = true
+    local fs = dir.fs
+    local path = getFsRelativePath(dir)
+    local entries = fs.list(path)
+    if entries then
+        for _, name in ipairs(entries) do
+            name = name:gsub("^/*", ""):gsub("/*$", "")
+            if name ~= "" and name ~= ".meta" and not findChild(dir, name) then
+                local isDir = fs.isDirectory(vfs.concat(path, name))
+                local node = createVNode(name, isDir and "VDIR" or "VREG", dir, fs)
+                if isDir then node.loaded = false end
+            end
+        end
+    end
+    loadDirMetadata(path, dir, fs)
+end
+
+---@type table<vnode, boolean>
+local dirtyDirs = {}
+
+-- Records that `dir`'s .meta must be rewritten; flushed by vfs.saveMetadata().
+---@param dir vnode|nil
+local function markDirty(dir)
+    if dir and dir.fs then
+        dirtyDirs[dir] = true
+        vfs._dirty = true
+    end
+end
+
+---@return table fd table of the calling process (index = fd + 1)
+local kfds = {}
+local function fdTable()
+    local proc = process.getCurrent()
+    if proc then return proc.fd end
+    if not kfds[1] then
+        -- kernel context: the console descriptors set up by devfs.init
+        kfds[1], kfds[2], kfds[3] = vhandles["0"], vhandles["1"], vhandles["2"]
+    end
+    return kfds
+end
+
+---@param fd any
+---@return table|nil description
+local function descriptor(fd)
+    if math.type(fd) ~= "integer" or fd < 0 then return nil end
+    return fdTable()[fd + 1]
+end
+
+-- Drops one reference to an open file description; the underlying handle is
+-- closed with the last one. Descriptions without `ref` (the console) persist.
+local function releaseDescription(d)
+    if not d.ref then return end
+    d.ref = d.ref - 1
+    if d.ref <= 0 then pcall((d.fs or devfs).close, d.fd) end
+end
+
+-- Lowest free descriptor, as open(2) allocates.
+local function allocFd(tbl, d, minimum)
+    local i = (minimum or 0) + 1
+    while tbl[i] ~= nil do i = i + 1 end
+    tbl[i] = d
+    return i - 1
+end
+
+---@param tbl table a process fd table
+---@return table a copy sharing the open file descriptions (fork/exec semantics)
+function vfsk.inheritFds(tbl, stdio)
+    local out = {}
+    if stdio == nil then
+        for i, d in pairs(tbl) do
+            if d.ref then d.ref = d.ref + 1 end
+            out[i] = d
+        end
+        return out
+    end
+    if type(stdio) ~= "table" then return nil, "Invalid stdio descriptor mapping" end
+
+    -- Resolve and validate the complete mapping before changing any reference
+    -- count. Use raw iteration so user supplied metatables cannot run here.
+    local resolved = {}
+    local function validSource(d, destination)
+        if not d or type(d.flag) ~= "string" then return false end
+        return d.flag:find(destination == 0 and "r" or "[wa]") ~= nil
+    end
+    for destination, source in next, stdio do
+        if math.type(destination) ~= "integer" or destination < 0 or destination > 2
+            or math.type(source) ~= "integer" or source < 0 then
+            return nil, "Invalid stdio descriptor mapping"
+        end
+        local d = rawget(tbl, source + 1)
+        if not validSource(d, destination) then
+            return nil, "Invalid stdio source descriptor"
+        end
+        resolved[destination + 1] = d
+    end
+    -- A partial redirection leaves the other standard streams unchanged when
+    -- their corresponding descriptors exist in the source table.
+    for destination = 0, 2 do
+        local slot = destination + 1
+        if resolved[slot] == nil then
+            local d = rawget(tbl, slot)
+            if d then
+                if not validSource(d, destination) then
+                    return nil, "Invalid stdio source descriptor"
+                end
+                resolved[slot] = d
+            end
+        end
+    end
+    for i, d in pairs(resolved) do
+        if d.ref then d.ref = d.ref + 1 end
+        out[i] = d
+    end
+    return out
+end
+
+-- Closes every descriptor of an exiting process.
+---@param tbl table
+function vfsk.closeAllFds(tbl)
+    for i, d in pairs(tbl) do
+        tbl[i] = nil
+        releaseDescription(d)
+    end
+end
+
+---@return table fd table for a process without a parent: the console
+function vfsk.consoleFds()
+    return { vhandles["0"], vhandles["1"], vhandles["2"] }
+end
+
+local function isRootCaller()
+    local proc = process.getCurrent()
+    return proc == nil or proc.euid == 0
+end
+
+-- Plain description of a mounted filesystem; never the filesystem object.
+---@param fs table
+local function mountInfo(fs)
+    local okL, label = pcall(fs.getLabel)
+    local okR, ro = pcall(fs.isReadOnly)
+    return {
+        address  = fs.address,
+        label    = okL and label or nil,
+        readOnly = okR and ro or false,
+    }
+end
+
 ---@param vnode vnode
 ---@param proc table
 ---@param action fs_action
@@ -116,7 +285,7 @@ local function checkPerms(vnode, proc, action)
     if proc.euid == 0 then return true end
 
     local perm_func
-    if vnode.uid == proc.uid then
+    if vnode.uid == (proc.euid or proc.uid) then
         if action == "r" then
             perm_func = permission.canOwnerRead
         elseif action == "w" then
@@ -124,7 +293,7 @@ local function checkPerms(vnode, proc, action)
         elseif action == "x" then
             perm_func = permission.canOwnerExec
         end
-    elseif vnode.gid == proc.gid then
+    elseif vnode.gid == (proc.egid or proc.gid) then
         if action == "r" then
             perm_func = permission.canGroupRead
         elseif action == "w" then
@@ -156,7 +325,7 @@ function vfs.can(path, action)
     if proc.euid == 0 then return true end
 
     -- ルートの実行権限確認
-    local rootNode = vfs.attributes("/")
+    local rootNode = vfsk.lookup("/")
     if not rootNode or not checkPerms(rootNode, proc, "x") then
         return false
     end
@@ -166,13 +335,13 @@ function vfs.can(path, action)
     local checkPath = "/"
     for i = 1, #parts - 1 do
         checkPath = vfs.concat(checkPath, parts[i])
-        local node = vfs.attributes(checkPath)
+        local node = vfsk.lookup(checkPath)
         if not node then return false end
         if not checkPerms(node, proc, "x") then return false end
     end
 
     -- ターゲット自身の権限確認
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if not vnode then return false end
     return checkPerms(vnode, proc, action)
 end
@@ -189,7 +358,7 @@ function vfs.resolve(path)
 end
 
 ---@return vnode
-function vfs.root()
+function vfsk.root()
     return vtab[vfs_root_hash]
 end
 
@@ -197,7 +366,7 @@ end
 ---@return vnode|nil
 ---@return string|nil
 ---@return vnode|nil
-function vfs.attributes(path)
+function vfsk.lookup(path)
     local current = vtab[vfs_root_hash]
     if not current then return nil, nil, nil end
     if path == "/" then return current, nil, current end
@@ -229,9 +398,10 @@ function vfs.attributes(path)
                 local base_path = vfs.realPath(current.parent) or "/"
                 new_path = vfs.canonical(vfs.concat(base_path, link_path, rest_path))
             end
-            return vfs.attributes(new_path)
+            return vfsk.lookup(new_path)
         end
 
+        if current.loaded == false then ensureLoaded(current) end
         local name_hash = fnv1a_hash(name)
         local next_node = current.children[name_hash]
         if not next_node then
@@ -279,10 +449,19 @@ function vfs.attributes(path)
     return current, relative_path, mount_node
 end
 
----@param vnode vnode
----@return string
+---@param vnode vnode|string|nil a vnode (kernel) or a path
+---@return string|nil
 function vfs.realPath(vnode)
-    if not vnode then return nil end
+    if type(vnode) == "string" then
+        vnode = vfsk.lookup(vfs.resolve(vnode))
+        -- lookup follows links inside the path; a path also resolves its last one
+        local hops = 0
+        while vnode and vnode.type == "VLNK" and vnode.link and hops < 16 do
+            vnode = type(vnode.link) == "string" and vfsk.lookup(vnode.link) or vnode.link
+            hops = hops + 1
+        end
+    end
+    if type(vnode) ~= "table" then return nil end
     local parts     = {}
     local current   = vnode
     local max_depth = 100
@@ -374,49 +553,65 @@ function vfs.name(path)
     return parts[#parts] or "/"
 end
 
----@param filter string
+---@param filter string label or address
 ---@return table|nil
 ---@return string|nil
-function vfs.proxy(filter)
+local function findFilesystem(filter)
     for c in component.list("filesystem") do
         if component.invoke(c, "getLabel") == filter then
             return component.proxy(c)
         end
     end
     local ok, proxy = pcall(component.proxy, filter)
-    if ok then return proxy else return nil, "No such component" end
+    if ok and proxy then return proxy else return nil, "No such component" end
 end
 
----@param fs oc_component_fs
+---@param filter string label or address
+---@return table|nil mount info
+---@return string|nil
+function vfs.proxy(filter)
+    if type(filter) ~= "string" then return nil, "bad argument #1 (string expected)" end
+    local fs, e = findFilesystem(filter)
+    if not fs then return nil, e end
+    return mountInfo(fs)
+end
+
+---@param fs table|string filesystem object (kernel), mount info, label or address
 ---@param path string
 ---@return boolean
 ---@return string|nil
 function vfs.mount(fs, path)
-    if type(fs) == "string" then fs = vfs.proxy(fs) end
-    assert(type(fs) == "table", "bad argument #1 (file system proxy or address expected)")
+    if not isRootCaller() then return false, "Permission denied" end
+    if type(fs) == "table" and type(fs.open) ~= "function" then fs = fs.address end -- mount info
+    if type(fs) == "string" then
+        local e
+        fs, e = findFilesystem(fs)
+        if not fs then return false, e end
+    end
+    if type(fs) ~= "table" then return false, "bad argument #1 (filesystem, label or address expected)" end
 
     path = vfs.resolve(path)
 
     if path ~= "/" and vfs.exists(path) then
         return false, "Not a directory"
     end
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if vnode and vnode.fs then return false, "Already mounted" end
 
     local parent = nil
     if path ~= "/" then
-        parent = vfs.attributes(vfs.path(path))
+        parent = vfsk.lookup(vfs.path(path))
     end
     vnode = createVNode(vfs.name(path), "VDIR", parent, fs)
-    if path == "/" then 
-        vtab[vfs_root_hash] = vnode 
+    if path == "/" then
+        vtab[vfs_root_hash] = vnode
     end
-    vfs.lookupFilesystem(path, fs)
+    if not fs.dynamic then vnode.loaded = false end
     return true
 end
 
----@return function
-function vfs.mounts()
+---@return {fs: table, path: string}[]
+local function mountPoints()
     local function build_path(node)
         local names = {}
         while node and node.parent do
@@ -427,44 +622,52 @@ function vfs.mounts()
     end
     local mounts = {}
     local function collect_mounts(node)
-        if node.fs then
+        if node.fs and (not node.parent or node.parent.fs ~= node.fs) then
             table.insert(mounts, { fs = node.fs, path = build_path(node) })
         end
         if node.children then
             for _, child in pairs(node.children) do
-                collect_mounts(child)
+                if child.type == "VDIR" then collect_mounts(child) end
             end
         end
     end
     local root = vtab[vfs_root_hash]
     if root then collect_mounts(root) end
-    local i, n = 0, #mounts
+    return mounts
+end
+
+---@return function iterator yielding mount info, path
+function vfs.mounts()
+    local mounts = mountPoints()
+    local i = 0
     return function()
         i = i + 1
-        if i <= n then return mounts[i].fs, mounts[i].path end
+        local m = mounts[i]
+        if m then return mountInfo(m.fs), m.path end
     end
 end
 
----@param fsOrPath oc_component_fs|string
+---@param target string mount path or (abbreviated) address
 ---@return boolean
-function vfs.umount(fsOrPath)
-    if type(fsOrPath) == "string" then
-        local vnode = vfs.attributes(fsOrPath)
-        if vnode and vnode.fs then
-            vnode.fs = nil
-            removeEmptyNodes(vnode)
-            return true
-        end
+function vfs.umount(target)
+    if not isRootCaller() then return false, "Permission denied" end
+    if type(target) ~= "string" then return false end
+    local vnode = vfsk.lookup(target)
+    if vnode and vnode.fs and (not vnode.parent or vnode.parent.fs ~= vnode.fs) then
+        vnode.fs = nil
+        removeEmptyNodes(vnode)
+        return true
     end
-    local addr   = type(fsOrPath) == "table" and fsOrPath.address or fsOrPath
     local result = false
-    for proxy, path in vfs.mounts() do
-        local maddr = type(proxy) == "table" and proxy.address or fsOrPath
-        if string.sub(maddr, 1, addr:len()) == addr then
-            local vnode = vfs.attributes(path)
-            vnode.fs = nil
-            removeEmptyNodes(vnode)
-            result = true
+    for _, m in ipairs(mountPoints()) do
+        local addr = m.fs.address
+        if addr and addr:sub(1, #target) == target then
+            local node = vfsk.lookup(m.path)
+            if node then
+                node.fs = nil
+                removeEmptyNodes(node)
+                result = true
+            end
         end
     end
     return result
@@ -474,7 +677,7 @@ end
 ---@return boolean
 ---@return string|nil
 function vfs.isLink(path)
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if vnode and vnode.type == "VLNK" and vnode.link then
         if type(vnode.link) == "string" then return true, vnode.link end
         return true, vfs.realPath(vnode.link)
@@ -487,14 +690,17 @@ end
 ---@return boolean
 ---@return string|nil
 function vfs.link(target, linkpath)
-    if vfs.attributes(linkpath) then return false, "File exists" end
+    if vfsk.lookup(linkpath) then return false, "File exists" end
 
-    local targetNode = vfs.attributes(target)
+    local targetNode = vfsk.lookup(target)
     if not targetNode then return false, "No such file or directory" end
 
     local parentPath = vfs.path(linkpath)
-    local parentNode = vfs.attributes(parentPath)
+    local parentNode = vfsk.lookup(parentPath)
     if not parentNode then return false, "Parent directory does not exist" end
+    if not (vfs.can(parentPath, "w") and vfs.can(parentPath, "x")) then
+        return false, "Permission denied"
+    end
 
     local name = vfs.name(linkpath)
     local hash = fnv1a_hash(name)
@@ -513,7 +719,7 @@ function vfs.link(target, linkpath)
         link     = targetNode,
         parent   = parentNode,
     }
-    vfs.saveMetadata()
+    markDirty(parentNode)
     return true
 end
 
@@ -522,28 +728,20 @@ end
 ---@return string|nil
 function vfs.readlink(path)
     path = vfs.resolve(path)
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if not vnode then return nil, "No such file or directory" end
     if vnode.type ~= "VLNK" or not vnode.link then return nil, "Not a symbolic link" end
     if type(vnode.link) == "string" then return vnode.link end
     return vfs.realPath(vnode.link)
 end
 
----@param path string
----@return oc_component_fs|nil
+---@param path string a mount point
+---@return table|nil mount info
 ---@return string|nil
 function vfs.get(path)
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if vnode and vnode.fs then
-        local proxy = vnode.fs
-        path = ""
-        while vnode and vnode.parent do
-            path  = vfs.concat(vnode.name, path)
-            vnode = vnode.parent
-        end
-        path = vfs.canonical(path)
-        if path ~= "/" then path = "/" .. path end
-        return proxy, path
+        return mountInfo(vnode.fs), vfs.realPath(vnode)
     end
     return nil, "No such file system"
 end
@@ -552,14 +750,14 @@ end
 ---@return boolean
 function vfs.exists(path)
     path = vfs.resolve(path)
-    return vfs.attributes(path) ~= nil
+    return vfsk.lookup(path) ~= nil
 end
 
 ---@param path string
 ---@return integer
 function vfs.size(path)
     -- FIX: getFsRelativePath でFS相対パスを使う (旧: rest変数 = VFS相対パスで不正確)
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if vnode and vnode.fs then
         return vnode.fs.size(getFsRelativePath(vnode))
     end
@@ -570,11 +768,11 @@ end
 ---@return boolean
 function vfs.isDirectory(path)
     path = vfs.resolve(path)
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if not vnode then return false end
     if vnode.type == "VLNK" and vnode.link then
         if type(vnode.link) == "string" then
-            local target = vfs.attributes(vnode.link)
+            local target = vfsk.lookup(vnode.link)
             return target ~= nil and target.type == "VDIR"
         end
         return vnode.link.type == "VDIR"
@@ -586,7 +784,7 @@ end
 ---@return integer
 function vfs.lastModified(path)
     -- FIX: getFsRelativePath でFS相対パスを使う
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if vnode and vnode.fs then
         return vnode.fs.lastModified(getFsRelativePath(vnode))
     end
@@ -598,13 +796,13 @@ end
 ---@return string|nil
 function vfs.list(path)
     path = vfs.resolve(path)
-    local vnode, rest, mp = vfs.attributes(path)
+    local vnode, rest, mp = vfsk.lookup(path)
     if not vnode or not mp then return nil, "No such file or directory" end
 
     if vnode.type == "VLNK" then
         if not vnode.link then error("Invalid link") end
         if type(vnode.link) == "string" then
-            vnode = vfs.attributes(vnode.link)
+            vnode = vfsk.lookup(vnode.link)
             if not vnode then error("Broken link") end
         else
             vnode = vnode.link
@@ -625,6 +823,7 @@ function vfs.list(path)
         return nil, "No such file or directory"
     end
 
+    if vnode.loaded == false then ensureLoaded(vnode) end
     local list = {}
     for _, node in pairs(vnode.children) do
         table.insert(list, node.name)
@@ -642,7 +841,7 @@ end
 ---@return string|nil
 function vfs.makeDirectory(path)
     path = vfs.resolve(path)
-    local parent_vnode, _, mp = vfs.attributes(vfs.path(path))
+    local parent_vnode, _, mp = vfsk.lookup(vfs.path(path))
 
     if vfs.exists(path) then
         return false, "File exists"
@@ -650,6 +849,9 @@ function vfs.makeDirectory(path)
 
     if not parent_vnode or not mp then
         return false, "No such file or directory"
+    end
+    if not (vfs.can(vfs.path(path), "w") and vfs.can(vfs.path(path), "x")) then
+        return false, "Permission denied"
     end
 
     local parent_fs_path = getFsRelativePath(parent_vnode)
@@ -662,8 +864,12 @@ function vfs.makeDirectory(path)
 
     local s, e = mp.fs.makeDirectory(full_rest)
     if s then
-        createVNode(vfs.name(path), "VDIR", parent_vnode, mp.fs)
-        vfs.saveMetadata()
+        local node = createVNode(vfs.name(path), "VDIR", parent_vnode, mp.fs)
+        local proc = process.getCurrent()
+        if proc then
+            node.uid, node.gid = proc.euid or proc.uid, proc.egid or proc.gid
+        end
+        markDirty(parent_vnode)
         return true
     end
     return false, e
@@ -674,37 +880,24 @@ end
 ---@return string|nil
 function vfs.remove(path)
     path = vfs.resolve(path)
-    local parent_vnode, rest, mp = vfs.attributes(vfs.path(path))
+    local target = vfsk.lookup(path)
+    local parent = target and target.parent
+    if not parent then return false, "No such file or directory" end
 
     if not vfs.can(vfs.path(path), "w") or not vfs.can(vfs.path(path), "x") then
-        return false, "Permission Denied"
+        return false, "Permission denied"
     end
 
-    local function vremove()
-        if not parent_vnode then return false, "No such file or directory" end
-        local name_hash = fnv1a_hash(vfs.name(path))
-        if parent_vnode.children[name_hash] then
-            parent_vnode.children[name_hash] = nil
-            removeEmptyNodes(parent_vnode)
-            return true
-        end
-        return false, "No such file or directory"
+    -- Links live in the VFS metadata. Regular files and directories must be
+    -- removed from their backing filesystem before discarding their vnode.
+    if target.fs and target.type ~= "VLNK" then
+        local ok, err = target.fs.remove(getFsRelativePath(target))
+        if not ok then return false, err end
     end
-
-    local function premove()
-        local target_vnode = vfs.attributes(path)
-        if target_vnode and target_vnode.fs then
-            return target_vnode.fs.remove(getFsRelativePath(target_vnode))
-        end
-        return false, "No such file or directory"
-    end
-
-    local s, e   = vremove()
-    local ps, pe = premove()
-    s            = s or ps
-    e            = pe or e
-    if s then vfs.saveMetadata() end
-    return s, e
+    parent.children[target.hash] = nil
+    removeEmptyNodes(parent)
+    markDirty(parent)
+    return true
 end
 
 function vfs.rename(oldPath, newPath)
@@ -726,86 +919,106 @@ function vfs.open(path, mode)
     assert(mode_table[mode],
         "bad argument #2 (r[b], w[b] or a[b] expected, got " .. mode .. ")")
 
-    local vnode, rest, mp = vfs.attributes(path)
+    local vnode, rest, mp = vfsk.lookup(path)
+    local created
     if not vnode then
-        local parent, _, parentMp = vfs.attributes(vfs.path(path))
-        if string.find(mode, "w") and parent and parentMp then
-            vnode = createVNode(vfs.name(path), "VREG", parent, parentMp.fs)
-            mp    = parentMp
-        else
+        local parentPath = vfs.path(path)
+        local parent, _, parentMp = vfsk.lookup(parentPath)
+        if not (mode:find("[wa]") and parent and parentMp) then
             return nil, "No such file or directory"
         end
+        -- creating an entry needs write and search permission on the directory
+        if not (vfs.can(parentPath, "w") and vfs.can(parentPath, "x")) then
+            return nil, "Permission denied"
+        end
+        vnode   = createVNode(vfs.name(path), "VREG", parent, parentMp.fs)
+        mp      = parentMp
+        created = parent
+        local proc = process.getCurrent()
+        if proc then
+            vnode.uid, vnode.gid = proc.euid or proc.uid, proc.egid or proc.gid
+        end
+    elseif not vfs.can(vfs.realPath(vnode) or path, mode:find("r") and "r" or "w") then
+        return nil, "Permission denied"
     end
 
     if not mp then return nil, "No mount point found for path" end
 
-    local abs_path = vfs.realPath(vnode) or path
-    if not vfs.can(abs_path, mode:find("r") and "r" or "w") then
-        return nil, "Permission denied"
+    local fs             = mp.fs
+    local fs_path        = getFsRelativePath(vnode)
+    local handle, reason = fs.open(fs_path, mode)
+    if not handle then
+        if created then created.children[vnode.hash] = nil end
+        return nil, reason
+    end
+    if created then markDirty(created) end
+
+    -- The open file description. fs and handle live only here and in these
+    -- closures; the returned object must not expose the filesystem.
+    local desc = { fs = fs, fd = handle, vnode = vnode, flag = mode, ref = 1 }
+    local proc = process.getCurrent()
+    local tbl  = proc and proc.fd
+    local fdnum = tbl and allocFd(tbl, desc)
+
+    local function isOpen()
+        if tbl then return tbl[fdnum + 1] == desc end
+        return desc.ref > 0
     end
 
-    local fs_path        = getFsRelativePath(vnode)
-    local handle, reason = mp.fs.open(fs_path, mode)
-    if not handle then return nil, reason end
+    local function release()
+        if not isOpen() then return end
+        if tbl then tbl[fdnum + 1] = nil end
+        releaseDescription(desc)
+    end
 
     ---@class vfs_handle
-    local file = { fs = mp.fs, handle = handle }
-    vhandles[tostring(handle)] = { fs = mp.fs, fd = handle, vnode = vnode, flag = mode }
+    local file = {}
+
+    -- the descriptor number in the owning process (nil in kernel context)
+    function file:fd() return fdnum end
 
     function file:close()
-        if self.handle then
-            self.fs.close(self.handle)
-            vhandles[tostring(self.handle)] = nil
-            self.handle = nil
-        else
-            error("file is already closed")
-        end
+        if not isOpen() then error("file is already closed") end
+        release()
     end
 
     function file:read(n)
-        if not self.handle then return nil, "file is closed" end
-        return self.fs.read(self.handle, n)
+        if not isOpen() then return nil, "file is closed" end
+        return fs.read(handle, n)
     end
 
     function file:readAll()
-        local content = ""
+        if not isOpen() then return nil, "file is closed" end
+        local chunks = {}
         while true do
-            local chunk, err = self.fs.read(self.handle, config.read_bytes)
+            local chunk, err = fs.read(handle, config.read_bytes)
             if not chunk then
                 if err then
                     error("fs: error while reading: " .. err ..
-                        " (path=" .. path .. " handle=" .. tostring(self.handle) .. ")")
+                        " (path=" .. path .. " handle=" .. tostring(handle) .. ")")
                 end
                 break
             end
-            content = content .. chunk
+            chunks[#chunks + 1] = chunk
         end
-        return content
+        return table.concat(chunks)
     end
 
     function file:seek(whence, offset)
-        if not self.handle then return nil, "file is closed" end
-        return self.fs.seek(self.handle, whence, offset)
+        if not isOpen() then return nil, "file is closed" end
+        return fs.seek(handle, whence, offset)
     end
 
     function file:write(str)
-        if not self.handle then return nil, "file is closed" end
-        return self.fs.write(self.handle, str)
+        if not isOpen() then return nil, "file is closed" end
+        return fs.write(handle, str)
     end
 
-    local function close(self)
-        if self.handle then
-            if pcall(self.fs.close, self.handle) then
-                vhandles[tostring(self.handle)] = nil
-                self.handle = nil
-            end
-        end
-    end
-    setmetatable(file, {
-        __gc    = function(self) close(self) end,
-        __close = function(self) close(self) end,
+    return setmetatable(file, {
+        __metatable = "file",
+        __gc        = release,
+        __close     = release,
     })
-    return file
 end
 
 ---@param path string
@@ -814,7 +1027,7 @@ function vfs.chmod(path, mode)
     path = vfs.resolve(path)
     if not mode then return nil, "Mode does not specified" end
 
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if not vnode then return nil, "No such file or directory" end
 
     local proc      = process.getCurrent()
@@ -828,7 +1041,7 @@ function vfs.chmod(path, mode)
     if not canModify then return nil, "Permission denied" end
 
     vnode.mode = mode
-    vfs.saveMetadata()
+    markDirty(vnode.parent)
 end
 
 ---@param path string
@@ -838,28 +1051,26 @@ function vfs.chown(path, uid, gid)
     path = vfs.resolve(path)
     if not uid or not gid then return nil, "UID or GID does not specified" end
 
-    local vnode = vfs.attributes(path)
+    local vnode = vfsk.lookup(path)
     if not vnode then return nil, "No such file or directory" end
 
-    local proc      = process.getCurrent()
-    local canModify = false
-    if not proc then
-        canModify = (process.getCurrentPID() == -1)
-    else
-        canModify = (proc.euid == 0) or (proc.euid == vnode.uid)
+    local proc = process.getCurrent()
+    if proc and proc.euid ~= 0 then
+        local ownGroup = gid == vnode.gid or gid == proc.egid or gid == proc.gid
+        if proc.euid ~= vnode.uid or uid ~= vnode.uid or not ownGroup then
+            return nil, "Operation not permitted"
+        end
     end
-
-    if not canModify then return nil, "Permission denied" end
 
     vnode.uid = uid
     vnode.gid = gid
-    vfs.saveMetadata()
+    markDirty(vnode.parent)
 end
 
 local function writeMeta(dirPath, children, fs)
-    if fs.isReadOnly and fs.isReadOnly() then return end
+    if fs.isReadOnly and fs.isReadOnly() then return true end
 
-    local meta = ""
+    local meta = {}
     for _, child in pairs(children) do
         local linkPath = ""
         if child.type == "VLNK" and child.link then
@@ -869,7 +1080,7 @@ local function writeMeta(dirPath, children, fs)
                 linkPath = vfs.realPath(child.link) or ""
             end
         end
-        meta = meta .. string.format("%s:%s:%d:%d:%d:%d:%d:%d:%d:%s\n",
+        meta[#meta + 1] = string.format("%s:%s:%d:%d:%d:%d:%d:%d:%d:%s\n",
             child.name,
             child.type,
             child.hash,
@@ -883,27 +1094,38 @@ local function writeMeta(dirPath, children, fs)
     end
 
     local metaPath = (dirPath == "/" and "" or dirPath) .. "/.meta"
-    local handle   = fs.open(metaPath, "w")
-    if handle then
-        fs.write(handle, meta)
-        fs.close(handle)
+    local handle, open_err = fs.open(metaPath, "w")
+    if not handle then return nil, open_err or "Unable to open metadata file" end
+    local write_ok, wrote, write_err = pcall(fs.write, handle, table.concat(meta))
+    local close_ok, closed, close_err = pcall(fs.close, handle)
+    if not write_ok then return nil, wrote end
+    if wrote == false or wrote == nil then
+        return nil, write_err or "Unable to write metadata file"
     end
+    -- OC filesystem close() returns no value on success; a raised error is
+    -- the only portable failure signal for close.
+    if not close_ok then return nil, closed end
+    if closed == false or (closed == nil and close_err ~= nil) then
+        return nil, close_err or "Unable to close metadata file"
+    end
+    return true
 end
 
 ---@param parent vnode
-local function loadDirMetadata(path, parent, fs)
+function loadDirMetadata(path, parent, fs)
     local metaPath = (path == "/" and "" or path) .. "/.meta"
     if not fs.exists(metaPath) then return end
 
     local handle = fs.open(metaPath, "r")
     if not handle then return end
 
-    local buffer = ""
+    local chunks = {}
     repeat
         local data = fs.read(handle, config.read_bytes)
-        if data then buffer = buffer .. data end
+        if data then chunks[#chunks + 1] = data end
     until not data
     fs.close(handle)
+    local buffer = table.concat(chunks)
 
     for line in string.gmatch(buffer, "[^\r\n]+") do
         local name, vtype, hash, mtime, btime, mode, refcount, uid, gid, link =
@@ -949,101 +1171,235 @@ local function loadDirMetadata(path, parent, fs)
     end
 end
 
-function vfs.saveMetadata()
-    local function saveDir(vnode)
-        local fs = vnode.fs
-        if not fs then return end
-        if fs.isReadOnly and fs.isReadOnly() then return end
-
-        local path = vfs.realPath(vnode)
-        if not path or not vnode.children then return end
-
-        writeMeta(path, vnode.children, fs)
-
-        for _, child in pairs(vnode.children) do
-            if child.type == "VDIR" and child.fs == fs then
-                saveDir(child)
+-- Rewrites the .meta of every directory changed since the last flush.
+-- `yield`, when given, is called between directories so the vfs_sync kernel
+-- thread spreads a large flush over several ticks instead of stalling.
+---@param yield? fun()
+function vfs.saveMetadata(yield)
+    local pending = dirtyDirs
+    dirtyDirs = {}
+    local firstError
+    for dir in pairs(pending) do
+        local attached = dir.parent == nil or dir.parent.children[dir.hash] == dir
+        if attached and dir.fs then
+            -- never truncate a .meta whose entries were not read yet
+            local ok, result, reason = pcall(function()
+                if dir.loaded == false then ensureLoaded(dir) end
+                return writeMeta(getFsRelativePath(dir), dir.children, dir.fs)
+            end)
+            if not ok or not result then
+                -- Preserve failed work so a later periodic sync or shutdown
+                -- retry can attempt it again.
+                dirtyDirs[dir] = true
+                firstError = firstError or (ok and reason or result)
             end
         end
+        if yield then yield() end
     end
-
-    local root = vtab[vfs_root_hash]
-    if root then saveDir(root) end
+    vfs._dirty = next(dirtyDirs) ~= nil
+    if firstError then return nil, tostring(firstError) end
     return true
 end
 
----@param basePath string
----@param fs oc_component_fs
-function vfs.lookupFilesystem(basePath, fs)
-    local base = vfs.attributes(basePath)
-    if not base then
-        error("Invalid basePath " .. basePath)
-    end
+-- Anonymous pipes use ordinary open-file descriptions so dup, exec and
+-- process exit all share the same endpoint lifetime rules as regular files.
+local PIPE_CAPACITY = 8192
+local pipeHandles = {}
+local nextPipeHandle = 1
+local pipeFs = {}
 
-    local function lookup(path, parent)
-        local entries = fs.list(path)
-        if not entries then return end
-
-        local subdirs = {}
-        for _, name in ipairs(entries) do
-            name = name:gsub("^/*", ""):gsub("/*$", "")
-            if name ~= ".meta" then
-                local dpath = vfs.concat(path, name)
-                --printk("vfs: indexing '" .. dpath .. "'")
-                local isDir = fs.isDirectory(dpath)
-                local vnode = createVNode(name, isDir and "VDIR" or "VREG", parent, fs)
-                if isDir then
-                    table.insert(subdirs, { path = dpath, vnode = vnode })
-                else
-                    vnode.size = fs.size(dpath)
-                end
-            end
-        end
-
-        loadDirMetadata(path, parent, fs)
-
-        for _, sub in ipairs(subdirs) do
-            lookup(sub.path, sub.vnode)
-        end
-    end
-
-    lookup("/", base)
-end
-
----@param handle integer
----@param value any
-function vfs.write(handle, value)
-    local desc = vhandles[tostring(handle)]
-    if not desc then return nil, "Bad file descriptor" end
-    if desc.vnode and desc.vnode.type == "VCHR" then
-        return devfs.write(handle, value)
-    end
-    return desc.fs.write(handle, value)
-end
-
----@param handle integer
----@param n integer
-function vfs.read(handle, n)
-    local desc = vhandles[tostring(handle)]
-    if not desc then return nil, "Bad file descriptor" end
-    if desc.vnode and desc.vnode.type == "VCHR" then
-        return devfs.read(handle, n)
-    end
-    return desc.fs.read(handle, n)
-end
-
----@param handle integer
-function vfs.close(handle)
-    local desc = vhandles[tostring(handle)]
-    if not desc then return nil, "Bad file descriptor" end
-    local result
-    if desc.vnode and desc.vnode.type == "VCHR" then
-        result = devfs.close(handle)
-    else
-        result = desc.fs.close(handle)
-    end
-    vhandles[tostring(handle)] = nil
+local function pipePop(pipe, count)
+    local amount = math.min(count, #pipe.buffer)
+    if amount <= 0 then return "" end
+    local result = pipe.buffer:sub(1, amount)
+    pipe.buffer = pipe.buffer:sub(amount + 1)
+    process.wakeIO(pipe.writers)
     return result
+end
+
+function pipeFs.read(handle, format)
+    local endpoint = pipeHandles[tostring(handle)]
+    if not endpoint or endpoint.side ~= "read" then return nil, "Bad file descriptor" end
+    local pipe = endpoint.pipe
+    local mode, count
+    if format == nil then
+        mode = "line"
+    elseif type(format) == "number" then
+        if math.type(format) ~= "integer" or format < 0 then return nil, "Invalid read count" end
+        if format == 0 then return "" end
+        mode, count = "count", format
+    elseif type(format) == "string" then
+        if format == "l" or format == "*l" then mode = "line"
+        elseif format == "L" or format == "*L" then mode = "line_keep"
+        elseif format == "a" or format == "*a" then mode = "all"
+        else return nil, "Unsupported pipe read format" end
+    else
+        return nil, "Invalid read format"
+    end
+
+    if mode == "count" then
+        while #pipe.buffer == 0 do
+            if pipe.writersOpen == 0 then return nil end
+            process.blockIO(pipe.readers)
+        end
+        return pipePop(pipe, count)
+    end
+
+    local chunks = {}
+    while true do
+        if #pipe.buffer > 0 then
+            if mode == "all" then
+                chunks[#chunks + 1] = pipePop(pipe, #pipe.buffer)
+            else
+                local newline = pipe.buffer:find("\n", 1, true)
+                if newline then
+                    local take = newline - (mode == "line" and 1 or 0)
+                    if take > 0 then chunks[#chunks + 1] = pipePop(pipe, take) end
+                    if mode == "line" then pipePop(pipe, 1) end
+                    return table.concat(chunks)
+                end
+                chunks[#chunks + 1] = pipePop(pipe, #pipe.buffer)
+            end
+        elseif pipe.writersOpen == 0 then
+            if mode == "all" then return table.concat(chunks) end
+            if #chunks > 0 then return table.concat(chunks) end
+            return nil
+        else
+            process.blockIO(pipe.readers)
+        end
+        if mode == "all" and pipe.writersOpen == 0 and #pipe.buffer == 0 then
+            return table.concat(chunks)
+        end
+    end
+end
+
+function pipeFs.write(handle, value)
+    local endpoint = pipeHandles[tostring(handle)]
+    if not endpoint or endpoint.side ~= "write" then return nil, "Bad file descriptor" end
+    if type(value) ~= "string" then return nil, "Invalid write data" end
+    local pipe = endpoint.pipe
+    local written = 0
+    while written < #value do
+        if pipe.readersOpen == 0 then
+            if written > 0 then return written, "Broken pipe" end
+            return nil, "Broken pipe"
+        end
+        local available = PIPE_CAPACITY - #pipe.buffer
+        if available <= 0 then
+            process.blockIO(pipe.writers)
+        else
+            local amount = math.min(available, #value - written)
+            pipe.buffer = pipe.buffer .. value:sub(written + 1, written + amount)
+            written = written + amount
+            process.wakeIO(pipe.readers)
+        end
+    end
+    return written
+end
+
+function pipeFs.seek()
+    return nil, "Illegal seek"
+end
+
+function pipeFs.close(handle)
+    local key = tostring(handle)
+    local endpoint = pipeHandles[key]
+    if not endpoint then return end
+    pipeHandles[key] = nil
+    local pipe = endpoint.pipe
+    if endpoint.side == "read" then
+        pipe.readersOpen = pipe.readersOpen - 1
+        process.wakeIO(pipe.writers)
+    else
+        pipe.writersOpen = pipe.writersOpen - 1
+        process.wakeIO(pipe.readers)
+    end
+end
+
+---@return integer|nil read_fd
+---@return integer|nil write_fd
+---@return string|nil error
+function vfs.pipe()
+    local tbl = fdTable()
+    local pipe = {
+        buffer = "",
+        readers = {},
+        writers = {},
+        readersOpen = 1,
+        writersOpen = 1,
+    }
+    local readHandle, writeHandle = nextPipeHandle, nextPipeHandle + 1
+    nextPipeHandle = nextPipeHandle + 2
+    pipeHandles[tostring(readHandle)] = { pipe = pipe, side = "read" }
+    pipeHandles[tostring(writeHandle)] = { pipe = pipe, side = "write" }
+    -- Leave closed standard streams closed until explicitly redirected.
+    local readFd = allocFd(tbl, { fs = pipeFs, fd = readHandle, flag = "r", ref = 1 }, 3)
+    local writeFd = allocFd(tbl, { fs = pipeFs, fd = writeHandle, flag = "w", ref = 1 }, 3)
+    return readFd, writeFd
+end
+
+---@param fd integer
+---@return boolean
+function vfs.isatty(fd)
+    local d = descriptor(fd)
+    return d ~= nil and (d == vhandles["0"] or d == vhandles["1"] or d == vhandles["2"])
+end
+
+---@param fd integer
+---@param value any
+function vfs.write(fd, value)
+    local d = descriptor(fd)
+    if not d or not (d.flag:find("w") or d.flag:find("a")) then return nil, "Bad file descriptor" end
+    return (d.fs or devfs).write(d.fd, value)
+end
+
+---@param fd integer
+function vfs.read(fd, ...)
+    local d = descriptor(fd)
+    if not d or not d.flag:find("r") then return nil, "Bad file descriptor" end
+    return (d.fs or devfs).read(d.fd, ...)
+end
+
+---@param fd integer
+function vfs.seek(fd, whence, offset)
+    local d = descriptor(fd)
+    if not d then return nil, "Bad file descriptor" end
+    return (d.fs or devfs).seek(d.fd, whence, offset)
+end
+
+---@param fd integer
+function vfs.close(fd)
+    local d = descriptor(fd)
+    if not d then return nil, "Bad file descriptor" end
+    fdTable()[fd + 1] = nil
+    releaseDescription(d)
+    return true
+end
+
+---@param fd integer
+---@return integer|nil new descriptor
+---@return string|nil
+function vfs.dup(fd)
+    local d = descriptor(fd)
+    if not d then return nil, "Bad file descriptor" end
+    if d.ref then d.ref = d.ref + 1 end
+    return allocFd(fdTable(), d)
+end
+
+---@param fd integer
+---@param newfd integer
+---@return integer|nil
+---@return string|nil
+function vfs.dup2(fd, newfd)
+    local d = descriptor(fd)
+    if not d or math.type(newfd) ~= "integer" or newfd < 0 then return nil, "Bad file descriptor" end
+    if fd == newfd then return newfd end
+    local tbl = fdTable()
+    local old = tbl[newfd + 1]
+    if d.ref then d.ref = d.ref + 1 end
+    tbl[newfd + 1] = d
+    if old then releaseDescription(old) end
+    return newfd
 end
 
 ---@param parentPath string
@@ -1053,15 +1409,40 @@ end
 ---@param perm? integer
 ---@return vnode|nil
 ---@return string|nil
-function vfs.createVNode(parentPath, name, vtype, fs, perm)
-    if vfs.attributes(vfs.concat(parentPath, name)) then
+function vfsk.createVNode(parentPath, name, vtype, fs, perm)
+    if vfsk.lookup(vfs.concat(parentPath, name)) then
         return nil, "VNode in the specified path already exists"
     end
-    local parent = vfs.attributes(parentPath)
+    local parent = vfsk.lookup(parentPath)
     if not parent then
         return nil, "Parent VNode does not exist"
     end
     return createVNode(name, vtype, parent, fs, perm)
+end
+
+-- Public stat: a detached copy, never the vnode itself.
+---@param path string
+---@return table|nil
+---@return string|nil
+function vfs.attributes(path)
+    path = vfs.resolve(path)
+    local v = vfsk.lookup(path)
+    if not v then return nil, "No such file or directory" end
+    local link
+    if v.type == "VLNK" and v.link then
+        link = type(v.link) == "string" and v.link or vfs.realPath(v.link)
+    end
+    return {
+        name  = v.name,
+        type  = v.type,
+        mode  = v.mode,
+        uid   = v.uid,
+        gid   = v.gid,
+        size  = v.type == "VREG" and vfs.size(path) or (v.size or 0),
+        mtime = v.mtime,
+        btime = v.btime,
+        link  = link,
+    }
 end
 
 ---@param filename string

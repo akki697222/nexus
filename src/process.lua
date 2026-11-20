@@ -6,11 +6,16 @@ processes = {}
 local process_map = setmetatable({}, { __mode = "v" })
 ---@type table<integer, boolean>
 local used_pids = {}
+local next_instance = 1
 process.current = -1
 
 local run_queue     = {}
 local wait_queue    = {}
 local suspend_queue = {}
+local io_waiters    = {}
+-- Spawn completion records belong to the parent process instance. They live
+-- until consumed by wait or until that parent exits.
+local spawn_completions = {}
 
 local function sort_run_queue()
     table.sort(run_queue, function(a, b)
@@ -19,6 +24,9 @@ local function sort_run_queue()
 end
 
 local function enqueue(queue, proc)
+    for _, queued in ipairs(queue) do
+        if queued == proc then return end
+    end
     table.insert(queue, proc)
 end
 
@@ -30,6 +38,25 @@ local function dequeue(queue, pid)
         end
     end
     return nil
+end
+
+local function dequeue_entry(queue, entry)
+    for i, queued in ipairs(queue) do
+        if queued == entry then
+            table.remove(queue, i)
+            return true
+        end
+    end
+    return false
+end
+
+local function dequeue_process(queue, proc)
+    for i = #queue, 1, -1 do
+        local queued = queue[i]
+        if queued.pid == proc.pid and queued.instance == proc.instance then
+            table.remove(queue, i)
+        end
+    end
 end
 
 local function enqueue_run(proc)
@@ -81,6 +108,7 @@ signals = {
 ---@class process_entry
 ---@field thread thread process coroutine thread
 ---@field pid integer process id
+---@field instance integer unique process instance id
 ---@field tid integer thread id
 ---@field pgid integer process group id
 ---@field path string process executable path
@@ -151,6 +179,16 @@ function process.getCurrent()
     end
 end
 
+local function getCurrentExecutionEntry()
+    local running = coroutine.running()
+    if running then
+        for _, entry in ipairs(processes) do
+            if entry.thread == running then return entry end
+        end
+    end
+    return process.getCurrent()
+end
+
 function process.getCurrentPID()
     return process.current
 end
@@ -182,15 +220,25 @@ function process.setEnviron(k, v)
     end
 end
 
+-- setuid(2)/setgid(2) semantics: a privileged process sets real, effective
+-- and saved ids; an unprivileged one may only switch its effective ids to
+-- its real or saved ones.
 ---@param usr user_passwd
+---@return boolean
+---@return string|nil
 function process.setuser(usr)
     local proc = process.getCurrent()
-    proc.uid = usr.uid
-    proc.euid = usr.uid
-    proc.suid = usr.uid
-    proc.gid = usr.gid
-    proc.egid = usr.gid
-    proc.sgid = usr.gid
+    if not proc then return false, "No such process" end
+    if proc.euid == 0 then
+        proc.uid, proc.euid, proc.suid = usr.uid, usr.uid, usr.uid
+        proc.gid, proc.egid, proc.sgid = usr.gid, usr.gid, usr.gid
+        return true
+    end
+    local uidOk = usr.uid == proc.uid or usr.uid == proc.suid
+    local gidOk = usr.gid == proc.gid or usr.gid == proc.sgid
+    if not (uidOk and gidOk) then return false, "Operation not permitted" end
+    proc.euid, proc.egid = usr.uid, usr.gid
+    return true
 end
 
 ---@param path string
@@ -198,8 +246,15 @@ end
 ---@param nice integer|nil
 ---@param env table|nil
 ---@param pid integer|nil
-function process.exec(path, args, nice, env, pid, uid, gid)
-    env = env or util.createEnv()
+local function exec(path, args, nice, env, pid, uid, gid, stdio, tracked_spawn)
+    if nice ~= nil and type(nice) ~= "number" then
+        return -1, "Invalid priority"
+    end
+    local current = process.getCurrent()
+    -- choosing the pid or the credentials of the new process is privileged
+    if current and current.euid ~= 0 then
+        pid, uid, gid = nil, nil, nil
+    end
     path = vfs.resolve(path)
     ---@type vnode|nil
     local attr = vfs.attributes(path)
@@ -207,17 +262,12 @@ function process.exec(path, args, nice, env, pid, uid, gid)
         return -1, "No such file"
     end
     if not vfs.can(path, "x") then
-        return -1, "Permission Denied"
+        return -1, "Permission denied"
     end
-    local func, err = loadfile(path)
-    if not func then
-        return -1, err
+    if pid and process_map[pid] then
+        return -1, "Process exists"
     end
-    local pid = pid or get_pid()
-    used_pids[pid] = true
-    if not func then return end
-    local cwd = vfs.root()
-    local current = process.getCurrent()
+    local cwd = vfsk.root()
     if current then
         cwd = current.cwd
         uid = uid or current.uid
@@ -228,16 +278,63 @@ function process.exec(path, args, nice, env, pid, uid, gid)
     end
     local parent = current or
         { pid = 0, pgid = 0, uid = uid, gid = gid, euid = 0, suid = 0, egid = 0, sgid = 0, environ = {} }
-    local euid = parent.euid
-    local suid = parent.suid
-    if permission.canSetUID(attr.mode) then
-        euid = attr.uid
-        euid = attr.uid
+    -- execve(2): set-user/group-ID bits change the effective ids, and the
+    -- saved ids take the new effective ones
+    local euid, egid = parent.euid, parent.egid
+    if permission.canSetUID(attr.mode) then euid = attr.uid end
+    if permission.canSetGID(attr.mode) then egid = attr.gid end
+    local suid, sgid = euid, egid
+    -- a privilege-raising exec never runs in an environment the caller built
+    if euid ~= parent.euid or egid ~= parent.egid then
+        env = nil
+        -- Do not carry caller-owned tables or metatables into a more privileged
+        -- process. Inspect raw keys so __len, __index, and __pairs cannot run.
+        if args ~= nil and type(args) ~= "table" then
+            return -1, "Invalid arguments"
+        end
+        local copied_args = {}
+        local max_arg = 0
+        for key, value in next, args or {} do
+            if type(key) ~= "number" or key < 1 or key > 65536 or key % 1 ~= 0
+                or type(value) ~= "string" then
+                return -1, "Invalid arguments"
+            end
+            if key > max_arg then max_arg = key end
+            copied_args[key] = value
+        end
+        for index = 1, max_arg do
+            if rawget(copied_args, index) == nil then
+                return -1, "Invalid arguments"
+            end
+        end
+        args = copied_args
     end
+    env = env or util.createEnv()
+    local func, err = loadfile(path, "bt", env)
+    if not func then
+        return -1, err
+    end
+    local allocated_pid = pid == nil
+    local pid = pid or get_pid()
+    used_pids[pid] = true
+    local instance = next_instance
+    next_instance = next_instance + 1
     ---@type process_entry
+    local inherited_fds, fd_err
+    if current and stdio ~= nil then
+        inherited_fds, fd_err = vfsk.inheritFds(current.fd, stdio)
+        if not inherited_fds then
+            if allocated_pid then used_pids[pid] = nil end
+            return -1, fd_err or "Failed to inherit file descriptors"
+        end
+    elseif current then
+        inherited_fds = vfsk.inheritFds(current.fd)
+    else
+        inherited_fds = vfsk.consoleFds()
+    end
     local entry = {
-        thread = wrap_with_traceback(func),
         pid = pid,
+        instance = instance,
         tid = pid,
         pgid = parent.pgid or 1,
         path = path,
@@ -250,31 +347,24 @@ function process.exec(path, args, nice, env, pid, uid, gid)
         gid = gid,
         euid = euid,
         suid = suid,
-        egid = parent.egid,
-        sgid = parent.sgid,
+        egid = egid,
+        sgid = sgid,
         signals = {},
-        fd = {
-            {
-                vnode = devfs.attributes("stdin") --[[@as vnode]],
-                fd = 0,
-                flag = "r"
-            },
-            {
-                vnode = devfs.attributes("stdout") --[[@as vnode]],
-                fd = 1,
-                flag = "w"
-            },
-            {
-                vnode = devfs.attributes("stderr") --[[@as vnode]],
-                fd = 2,
-                flag = "w"
-            }
-        },
+        -- descriptors are inherited across exec; spawn may remap the child stdio
+        fd = inherited_fds,
         sig_handlers = get_default_signal_handlers(pid),
         tty = 0,
         status = "running",
         environ = util.copyTable(parent.environ)
     }
+    if tracked_spawn then
+        entry.spawn_parent_instance = current and current.instance or nil
+        entry.spawn_tracked = true
+        if current then
+            spawn_completions[current.instance] = spawn_completions[current.instance] or {}
+        end
+    end
+    entry.thread = wrap_with_traceback(func, entry)
 
     table.insert(processes, entry)
     process_map[pid] = entry
@@ -283,37 +373,125 @@ function process.exec(path, args, nice, env, pid, uid, gid)
     return pid
 end
 
-function process.wait(pid)
-    local proc = process.getCurrent()
-    if proc then
-        dequeue(run_queue, proc.pid)
-        proc.status = "waiting"
-        enqueue(wait_queue, proc)
-    end
+---@param path string
+---@param args table|nil
+---@param nice integer|nil
+---@param env table|nil
+---@param pid integer|nil
+function process.exec(path, args, nice, env, pid, uid, gid)
+    return exec(path, args, nice, env, pid, uid, gid, nil, false)
+end
 
-    while true do
-        local target = process.get(pid)
-        if target == nil or target.status == "dead" then
-            if proc then
-                dequeue(wait_queue, proc.pid)
-                proc.status = "running"
-                enqueue_run(proc)
+-- A spawn is deliberately a small exec surface: callers can select argv and
+-- descriptor mappings, but cannot provide an environment or credentials.
+function process.spawn(path, args, stdio)
+    if stdio == nil then stdio = {} end
+    local pid, err = exec(path, args, nil, nil, nil, nil, nil, stdio, true)
+    if pid == -1 then return pid, err end
+    local child = process.get(pid)
+    if child then return pid, nil, child.instance end
+    return pid
+end
+
+function process.wait(pid, instance)
+    local proc = process.getCurrent()
+    local target = process.get(pid)
+    local owned = proc and spawn_completions[proc.instance]
+    if instance ~= nil then
+        if type(instance) ~= "number" or instance % 1 ~= 0 then return "No such process", nil end
+        if target and target.instance == instance then
+            -- wait below on the exact live entry
+        else
+            local result = owned and owned[instance]
+            if result and result.pid == pid then
+                owned[instance] = nil
+                return result.err, result.status
             end
-            break
-        elseif target ~= nil and target.err then
-            if proc then
-                dequeue(wait_queue, proc.pid)
-                proc.status = "running"
-                enqueue_run(proc)
-            end
-            return target.err
+            return "No such process", nil
         end
-        coroutine.yield("__event_wait__")
     end
+    if not target and owned then
+        for child_instance, result in pairs(owned) do
+            if result.pid == pid then
+                owned[child_instance] = nil
+                return result.err, result.status
+            end
+        end
+    end
+    if not target then return end
+    if target.status == "dead" then
+        if owned and target.spawn_parent_instance == proc.instance then owned[target.instance] = nil end
+        return target.err, target.exit_status
+    end
+    if not proc then return end
+
+    -- Keep the target entry itself: its PID may be reused after it exits.
+    proc.wait_target = target
+    proc.wait_spawn_instance = target.spawn_tracked and target.spawn_parent_instance == proc.instance
+        and target.instance or nil
+    proc.wait_result = nil
+    dequeue(run_queue, proc.pid)
+    proc.status = "waiting"
+    coroutine.yield("__process_wait__")
+    local result = proc.wait_result
+    local status = proc.wait_status
+    local completed_instance = proc.wait_spawn_instance
+    proc.wait_result = nil
+    proc.wait_status = nil
+    proc.wait_spawn_instance = nil
+    local completions = spawn_completions[proc.instance]
+    if completed_instance and completions then completions[completed_instance] = nil end
+    return result, status
+end
+
+local function resolve_process_waiters(target)
+    local to_wake = {}
+    for _, waiter in ipairs(processes) do
+        if waiter.wait_target == target then
+            waiter.wait_target = nil
+            waiter.wait_result = target.err
+            waiter.wait_status = target.exit_status
+            dequeue(wait_queue, waiter.pid)
+            if waiter.status == "waiting" then
+                waiter.status = "running"
+                table.insert(to_wake, waiter)
+            end
+        end
+    end
+    for _, waiter in ipairs(to_wake) do enqueue_run(waiter) end
+end
+
+local function normalize_exit_status(value, fallback)
+    if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+        value = fallback or 0
+    end
+    return math.floor(value) % 256
+end
+
+local function record_spawn_completion(target)
+    if not target.spawn_tracked or not target.spawn_parent_instance then return end
+    local owned = spawn_completions[target.spawn_parent_instance]
+    if not owned then return end -- parent exited; do not retain orphan records
+    owned[target.instance] = {
+        pid = target.pid,
+        err = target.err,
+        status = target.exit_status,
+    }
+end
+
+local function finish_process(target, status)
+    if target.status == "dead" then return end
+    target.exit_status = normalize_exit_status(status, target.err and 1 or 0)
+    target.status = "dead"
+    record_spawn_completion(target)
+    resolve_process_waiters(target)
 end
 
 function process.exit(code)
-    process.kill(process.current)
+    local proc = process.getCurrent()
+    if not proc then return end
+    proc.requested_exit_status = normalize_exit_status(code, 0)
+    process.kill(proc.pid)
     coroutine.yield("__exit__")
 end
 
@@ -323,9 +501,24 @@ function process.kill(pid)
         return false, "No such process"
     end
 
-    dequeue(run_queue, pid)
-    dequeue(wait_queue, pid)
-    dequeue(suspend_queue, pid)
+    -- Resolve waiters while this exact process entry is still registered and
+    -- before its PID can be allocated to another process.
+    finish_process(proc, proc.requested_exit_status or 137)
+
+    dequeue_process(run_queue, proc)
+    dequeue_process(wait_queue, proc)
+    dequeue_process(suspend_queue, proc)
+    for channel, waiters in pairs(io_waiters) do
+        for i = #waiters, 1, -1 do
+            local waiter = waiters[i]
+            if waiter.pid == proc.pid and waiter.instance == proc.instance then
+                waiter.io_wait_channel = nil
+                waiter.io_ready = nil
+                table.remove(waiters, i)
+            end
+        end
+        if #waiters == 0 then io_waiters[channel] = nil end
+    end
 
     for i, p in ipairs(processes) do
         if p.pid == pid then
@@ -335,8 +528,43 @@ function process.kill(pid)
     end
 
     event.removeQueue(pid)
+    if proc.tid == proc.pid and proc.fd then
+        vfsk.closeAllFds(proc.fd)
+    end
+    process_map[pid] = nil
     used_pids[pid] = nil
+    spawn_completions[proc.instance] = nil
     return true
+end
+
+-- Kernel-only targeted IO wait. A channel is an opaque kernel-owned identity;
+-- this API is removed from user and module process environments in env.lua.
+function process.blockIO(channel)
+    if channel == nil then error("Invalid IO wait channel", 2) end
+    local proc = getCurrentExecutionEntry()
+    if not proc then error("IO wait requires a process", 2) end
+    proc.io_wait_channel = channel
+    coroutine.yield("__process_io_wait__")
+end
+
+function process.wakeIO(channel)
+    local waiters = io_waiters[channel]
+    if not waiters then return 0 end
+    io_waiters[channel] = nil
+    local count = 0
+    for _, waiter in ipairs(waiters) do
+        if waiter.io_wait_channel == channel then
+            waiter.io_wait_channel = nil
+            if waiter.status == "suspended" then
+                waiter.io_ready = true
+            elseif waiter.status == "waiting" then
+                waiter.status = "running"
+                enqueue_run(waiter)
+            end
+            count = count + 1
+        end
+    end
+    return count
 end
 
 function process.suspend(pid)
@@ -358,6 +586,20 @@ function process.resume_handle(pid)
     end
 
     dequeue(suspend_queue, pid)
+    if proc.wait_target then
+        -- A suspended process waiter still waits for its original target.
+        proc.status = "waiting"
+        enqueue(wait_queue, proc)
+        return true
+    end
+    if proc.io_wait_channel and not proc.io_ready then
+        proc.status = "waiting"
+        return true
+    end
+    if proc.io_ready then
+        proc.io_ready = nil
+        proc.io_wait_channel = nil
+    end
     proc.status = "running"
     enqueue_run(proc)
     return true
@@ -373,6 +615,7 @@ function process.createThread(func, name, ...)
     local thread_entry = {
         thread = wrap_with_traceback(func),
         pid = parent.pid,
+        instance = parent.instance,
         tid = tid,
         pgid = parent.pgid,
         path = parent.path .. " [thread:" .. (name or tid) .. "]",
@@ -436,8 +679,12 @@ function process.cwd(path, parent)
     if not path or path == "" then
         return vfs.realPath(proc.cwd)
     end
-    local vnode = vfs.attributes(path)
-    proc.cwd = vnode or vfs.root()
+    path = vfs.resolve(path)
+    local vnode = vfsk.lookup(path)
+    if not vnode then return nil, "No such file or directory" end
+    if not vfs.isDirectory(path) then return nil, "Not a directory" end
+    if not vfs.can(path, "x") then return nil, "Permission denied" end
+    proc.cwd = vnode
     local real = vfs.realPath(proc.cwd)
     proc.environ.PWD = real
     return real
@@ -457,7 +704,7 @@ function process.resume(proc, ev)
     end
 
     if coroutine.status(proc.thread) == "dead" then
-        proc.status = "dead"
+        finish_process(proc, 0)
         return true
     end
 
@@ -478,18 +725,45 @@ function process.resume(proc, ev)
 
     local ok, ret = coroutine.resume(proc.thread, table.unpack(args))
     if not ok then
+        -- Scheduler diagnostics must use the kernel console, not the failed
+        -- process's possibly piped descriptors or suspended coroutine.
+        local old_current = process.current
+        process.current = -1
         printk("Process " .. proc.pid .. " Exited on error: " .. tostring(ret))
-        proc.status = "dead"
+        process.current = old_current
+        finish_process(proc, 1)
+        return true
+    end
+
+    -- A normal function return does not yield a scheduler sentinel. Notice its
+    -- dead coroutine now so waiters are released in this same scheduler pass.
+    if coroutine.status(proc.thread) == "dead" then
+        finish_process(proc, ret)
         return true
     end
 
     if ret == "__exit__" then
-        proc.status = "dead"
+        finish_process(proc, proc.requested_exit_status or 0)
         return true
+    elseif ret == "__process_wait__" then
+        dequeue(run_queue, proc.pid)
+        proc.status = "waiting"
     elseif ret == "__event_wait__" then
         dequeue(run_queue, proc.pid)
         proc.status = "waiting"
         enqueue(wait_queue, proc)
+    elseif ret == "__process_io_wait__" then
+        if proc.io_wait_channel ~= nil then
+            dequeue_entry(run_queue, proc)
+            proc.status = "waiting"
+            local waiters = io_waiters[proc.io_wait_channel]
+            if not waiters then waiters = {}; io_waiters[proc.io_wait_channel] = waiters end
+            enqueue(waiters, proc)
+        else
+            -- User code may yield arbitrary strings; only blockIO can set the
+            -- matching private channel before yielding this scheduler marker.
+            proc.status = "running"
+        end
     else
         proc.status = "running"
     end
@@ -500,7 +774,7 @@ end
 function process.dispatchWaiting(ev)
     local to_run = {}
     for _, proc in ipairs(wait_queue) do
-        if ev and ev.n > 0 then
+        if not proc.wait_target and ev and ev.n > 0 then
             table.insert(to_run, proc)
         end
     end
@@ -517,6 +791,7 @@ function process.list()
     for _, proc in ipairs(processes) do
         table.insert(result, {
             pid = proc.pid,
+            instance = proc.instance,
             uid = proc.uid,
             status = proc.status,
             tty = proc.tty,

@@ -67,9 +67,8 @@ local function user_getShadow(username)
 end
 
 function user.checkRoot()
-    ---@type user_passwd
-    local usr = user.getCurrent() or { uid = 0, gid = 0 }
-    return usr.uid == 0 or usr.gid == 0
+    local proc = process.getCurrent()
+    return proc ~= nil and proc.euid == 0
 end
 
 function user.updateUsers()
@@ -101,7 +100,7 @@ end
 function user.getUser(username)
     for _, entry in ipairs(users) do
         if entry.username == username then
-            return entry
+            return util.copyTable(entry)
         end
     end
 
@@ -192,7 +191,7 @@ end
 function user.getUserByUID(uid)
     for _, entry in ipairs(users) do
         if entry.uid == uid then
-            return entry
+            return util.copyTable(entry)
         end
     end
 

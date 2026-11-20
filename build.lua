@@ -115,9 +115,6 @@ if props.overwrite then
     end
 end
 
-print("Move: " .. outputFile .. " to ../ocelot/boot/boot/kernel.lua")
-copyFile(outputFile, "../ocelot/boot/boot/kernel.lua")
-
 print("Deploying ./root to ../ocelot/boot...")
 local exitCode = os.execute("xcopy \".\\root\\*\" \"..\\ocelot\\boot\\\" /E /I /Y > nul")
 
@@ -125,6 +122,15 @@ if exitCode ~= 0 and exitCode ~= true then
     print("Warning: Failed to copy ./root directory.")
 else
     print("Directory sync complete.")
+end
+
+-- after the sync: overwrite mode starts from an empty ../ocelot/boot, so
+-- boot/ only exists once ./root has been copied
+os.execute("if not exist \"..\\ocelot\\boot\\boot\" mkdir \"..\\ocelot\\boot\\boot\"")
+print("Move: " .. outputFile .. " to ../ocelot/boot/boot/kernel.lua")
+local copied, copyErr = copyFile(outputFile, "../ocelot/boot/boot/kernel.lua")
+if not copied then
+    print("Warning: Failed to copy kernel.lua: " .. (copyErr or ""))
 end
 
 if deployToOC then

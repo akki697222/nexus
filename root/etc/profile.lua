@@ -1,6 +1,6 @@
 local colors = require("colors")
 
-os.setenv("PATH", ".:/usr/bin:/usr/sbin:/bin:/sbin")
+os.setenv("PATH", ".:/usr/bin:/usr/sbin:/bin:/sbin:/ubin:/usr/ubin")
 os.setenv("HOME", "/root")
 os.setenv("USERNAME", "root")
 os.setenv("PS1", colors.green .. "$USERNAME@$HOSTNAME" .. colors.reset .. ":" .. colors.bright_blue .. "$PWD" .. colors.reset .. "# ")

@@ -23,80 +23,11 @@ event = event
 ---@type system
 system = system
 
--- setting up package.preload
-package.preload.filesystem = setmetatable({}, { __index = vfs })
-package.preload.computer = setmetatable({}, { __index = computer })
-package.preload.component = setmetatable({}, { __index = component })
-package.preload.event = setmetatable({}, { __index = event })
-package.preload.unicode = setmetatable({}, { __index = unicode })
--- nexus apis
-package.preload.permission = setmetatable({}, { __index = permission })
-package.preload.module = setmetatable({}, { __index = module })
-package.preload.process = setmetatable({}, { __index = process })
-package.preload.devfs = setmetatable({}, { __index = devfs })
-package.preload.sha2 = setmetatable({}, { __index = sha2 })
-package.preload.system = setmetatable({}, { __index = system })
-package.preload.user = setmetatable({}, { __index = user })
-package.preload.group = setmetatable({}, { __index = group })
-package.preload.device = setmetatable({}, { __index = device })
-package.preload.util = setmetatable({}, { __index = util })
-
--- default lua environment for openos compability
-local env = {
-    coroutine = coroutine,
-    debug = debug,
-    io = io,
-    math = math,
-    os = os,
-    shell = shell,
-    package = package,
-    table = table,
-    string = string,
-    utf8 = utf8,
-    assert = assert,
-    collectgarbage = function()
-        -- do nothing
-    end,
-    getmetatable = getmetatable,
-    setmetatable = setmetatable,
-    ipairs = ipairs,
-    pairs = pairs,
-    load = load,
-    loadfile = loadfile,
-    dofile = function(filename)
-        local chunk, err = loadfile(filename)
-        if not chunk then
-            error(err or "failed to load file", 2)
-        end
-        return chunk()
-    end,
-    print = print,
-    next = next,
-    pcall = pcall,
-    xpcall = xpcall,
-    rawequal = rawequal,
-    rawget = rawget,
-    rawlen = rawlen,
-    rawset = rawset,
-    select = select,
-    tonumber = tonumber,
-    tostring = tostring,
-    error = error,
-    type = type,
-    require = require,
-    checkArg = checkArg,
-    _VERSION = _VERSION,
-    _OSVERSION = _OSVERSION,
-    _OSVERSIONNUMBER = _OSVERSIONNUMBER,
-    _OSDIST = _OSDIST,
-    _NEXUS = true,
-}
-
-util.createEnv = function()
-    local newEnv = setmetatable({}, { __index = env })
-    newEnv._G = newEnv
-    return newEnv
-end
+-- Userland and kernel modules get their environments from env.lua and must
+-- never see the raw OC APIs; drop them from the global table the kernel was
+-- loaded into (kernel code keeps its own upvalues, see base.lua).
+_ENV.component = nil
+_ENV.computer = nil
 
 -- resets framebuffer controller
 fbcon.reset()
@@ -143,18 +74,34 @@ local function main()
 
     vfs.link("/usr/sbin", "/sbin")
     vfs.link("/usr/bin", "/bin")
+    vfs.link("/usr/ubin", "/ubin")
 
     for path in vfs.list("/usr/bin") do
         vfs.chmod(vfs.concat("/usr/bin", path), 0755)
     end
+
+    for path in vfs.list("/usr/ubin") do
+        vfs.chmod(vfs.concat("/usr/ubin", path), 0755)
+    end
+
+    -- Keep sudo as the only set-user-ID entry point. Its policy is immutable
+    -- to non-root users and defaults are installed in /etc/sudoers.
+    vfs.chown("/usr/bin/sudo.lua", 0, 0)
+    vfs.chmod("/usr/bin/sudo.lua", 04755)
+    vfs.chown("/etc/sudoers", 0, 0)
+    vfs.chmod("/etc/sudoers", 0440)
 
     system.createKernelThread(function()
         local SAVE_INTERVAL = 1
         local last_save = computer.uptime()
         while true do
             if vfs._dirty and computer.uptime() - last_save >= SAVE_INTERVAL then
-                vfs.saveMetadata()
-                vfs._dirty = false
+                local ok, err = system._syncMetadata(function()
+                    return vfs.saveMetadata(coroutine.yield)
+                end)
+                if not ok and err ~= "Metadata sync is stopping" then
+                    printk("vfs: metadata sync failed: " .. tostring(err))
+                end
                 last_save = computer.uptime()
             end
             coroutine.yield()
@@ -204,7 +151,7 @@ end
         system.setConsole({
             stdin = {
                 read = function(_, ...)
-                    return tty.read()
+                    return tty.read(...)
                 end
             },
             stdout = {
@@ -256,24 +203,31 @@ end
         local premoves = {}
         local snapshot = {}
         for _, proc in ipairs(run_queue) do
-            table.insert(snapshot, proc)
+            -- Threads share their owning process PID, so keep that owner
+            -- alongside each queued thread entry when checking PID reuse.
+            table.insert(snapshot, { entry = proc, owner = process.get(proc.pid) })
         end
 
-        for _, proc in ipairs(snapshot) do
-            if process.get(proc.pid) then
+        for _, item in ipairs(snapshot) do
+            local proc = item.entry
+            if item.owner and item.owner.instance == proc.instance
+                and process.get(proc.pid) == item.owner then
                 local dead = process.resume(proc, event)
                 if dead then
-                    table.insert(premoves, proc.pid)
+                    table.insert(premoves, item)
                 end
             end
         end
 
-        for _, pid in ipairs(premoves) do
-            local proc = process.get(pid)
-            if proc then
-                process.kill(pid)
+        for _, item in ipairs(premoves) do
+            local proc = item.entry
+            if item.owner and item.owner.instance == proc.instance
+                and process.get(proc.pid) == item.owner then
+                process.kill(proc.pid)
             end
         end
+        -- back in kernel context: no process is current
+        process.current = -1
     end
 
     resumeKernelThreads = function()

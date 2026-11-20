@@ -38,10 +38,9 @@ end)
 
 def("/mounts", function()
     local lines = {}
-    for proxy, path in vfs.mounts() do
-        local label   = (type(proxy) == "table" and proxy.getLabel and proxy.getLabel()) or "?"
-        local ro_rw   = (type(proxy) == "table" and proxy.isReadOnly and proxy.isReadOnly()) and "ro" or "rw"
-        local address = (type(proxy) == "table" and proxy.address) or tostring(proxy)
+    for info, path in vfs.mounts() do
+        local ro_rw   = info.readOnly and "ro" or "rw"
+        local address = info.address or info.label or "none"
         table.insert(lines, string.format("%s %s ocfs %s 0 0\n", address:sub(1, 8), path, ro_rw))
     end
     return table.concat(lines)
@@ -88,7 +87,11 @@ local function proc_fd_list(pid)
     local proc = process.get(pid)
     if not proc then return nil end
     local lines = {}
-    for i, desc in ipairs(proc.fd or {}) do
+    local slots = {}
+    for i in pairs(proc.fd or {}) do slots[#slots + 1] = i end
+    table.sort(slots)
+    for _, i in ipairs(slots) do
+        local desc = proc.fd[i]
         local name = "?"
         if desc.vnode then
             name = vfs.realPath and vfs.realPath(desc.vnode) or (desc.vnode.name or "?")

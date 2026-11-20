@@ -1,3 +1,5 @@
+local fs = require("filesystem")
+
 local function usage()
     io.stderr:write("usage: realpath FILE...\n")
     return 1
@@ -10,7 +12,7 @@ local function main(...)
     end
 
     for _, path in ipairs(paths) do
-        local resolved = vfs.realPath(path)
+        local resolved = fs.realPath(path)
         if not resolved then
             io.stderr:write("realpath: " .. path .. ": No such file or directory\n")
             return 1

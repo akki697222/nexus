@@ -1,0 +1,7 @@
+# Nexus sudo supports simple user/group rules with ALL=(root|ALL) ALL.
+root ALL=(root) ALL
+
+# Example: grant debug the same access after intentionally enabling this rule.
+# debug ALL=(root) ALL
+# Example group rule:
+# %sudo ALL=(root) ALL

@@ -135,12 +135,14 @@ function device.register()
         floppy = 0
     }
     for addr, dev in pairs(system_devices) do
-        local proxy = component.proxy(addr)
-        if dev.type == "volume" and proxy then
-            devfs.create("hd" .. counts.volume, proxy, true)
+        -- block nodes carry no I/O methods: volume contents are only
+        -- reachable through the VFS, never through the backing component
+        local node = { address = addr }
+        if dev.type == "volume" then
+            devfs.create("hd" .. counts.volume, node, true, 0600)
             counts.volume = counts.volume + 1
-        elseif dev.type == "floppy" and proxy then
-            devfs.create("fd" .. counts.floppy, proxy, true)
+        elseif dev.type == "floppy" then
+            devfs.create("fd" .. counts.floppy, node, true, 0600)
             counts.floppy = counts.floppy + 1
         end
     end

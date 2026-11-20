@@ -22,7 +22,7 @@ while true do
         process.setEnviron("SHELL", usr.shell)
         process.setEnviron("PWD", usr.home)
 
-        local shell_pid, err = process.exec(usr.shell)
+        local shell_pid, err = process.exec(usr.shell, { "-l" })
         if shell_pid == -1 then
             io.stderr:write("login: " .. usr.shell .. ": " .. tostring(err) .. "\n")
         else

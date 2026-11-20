@@ -3,99 +3,112 @@ local colors  = require("colors")
 local fs      = require("filesystem") --[[@as vfs]]
 local process = require("process")
 
-local function expand_env(s)
-    s = s:gsub("%${([%w_]+)}", function(k) return os.getenv(k) or "" end)
-    s = s:gsub("%$([%w_]+)",   function(k) return os.getenv(k) or "" end)
-    return s
+local function expand_env(s, lookup)
+    lookup = lookup or os.getenv
+    return (s:gsub("%$({?)([%w_?]+)(}?)", function(open, key, close)
+        if open == "{" then
+            if close == "" then return "${" .. key end
+            return lookup(key) or ""
+        end
+        return (lookup(key) or "") .. close
+    end))
 end
 
-local function expand_prompt(ps1)
-    local home = os.getenv("HOME") or ""
-    local pwd  = os.getenv("PWD") or "/"
+local function home_path()
+    local home = os.getenv("HOME")
+    if home and home ~= "" then return fs.concat(home) end
+end
 
-    local display_pwd = pwd
-    if home ~= "" and pwd:sub(1, #home) == home then
-        display_pwd = "~" .. pwd:sub(#home + 1)
+local function prompt_path()
+    local cwd = process.cwd() or "/"
+    local home = home_path()
+    if cwd == home then return "~" end
+    if home == "/" then return "~" .. cwd end
+    if home and cwd:sub(1, #home + 1) == home .. "/" then
+        return "~" .. cwd:sub(#home + 1)
     end
-
-    ps1 = ps1:gsub("%${PWD}", display_pwd:gsub("%%", "%%%%"))
-    ps1 = ps1:gsub("%$PWD",   display_pwd:gsub("%%", "%%%%"))
-
-    return expand_env(ps1)
+    return cwd
 end
 
 ---@param line string
----@return string[]
+---@return string[][] segments, boolean malformed
 local function tokenize(line)
-    local tokens = {}
-    local i = 1
-    local len = #line
-
-    while i <= len do
-        while i <= len and line:sub(i,i):match("%s") do i = i + 1 end
-        if i > len then break end
-
-        local c = line:sub(i,i)
-        local token = ""
-
-        if c == "#" then
-            break
-        elseif c == "'" then
-            i = i + 1
-            while i <= len and line:sub(i,i) ~= "'" do
-                token = token .. line:sub(i,i)
-                i = i + 1
+    local segments, words = {}, {}
+    local word, started = {}, false
+    local quote, escaped, word_unquoted_start = nil, false, false
+    local i, len = 1, #line
+    local function finish_word()
+        if not started then return end
+        local value = table.concat(word)
+        if word_unquoted_start and value:sub(1, 1) == "~" then
+            local home = home_path()
+            if home then
+                if value == "~" then value = home
+                else value = (home == "/" and "" or home) .. value:sub(2) end
             end
-            i = i + 1
-        elseif c == '"' then
-            i = i + 1
-            while i <= len and line:sub(i,i) ~= '"' do
-                local ch = line:sub(i,i)
-                if ch == "\\" and i < len then
-                    i = i + 1
-                    token = token .. line:sub(i,i)
-                elseif ch == "$" then
-                    local rest = line:sub(i)
-                    local var, endpos
-                    var, endpos = rest:match("^%${([%w_]+)}()")
-                    if var then
-                        token = token .. (os.getenv(var) or "")
-                        i = i + endpos - 1 - 1
-                    else
-                        var, endpos = rest:match("^%$([%w_]+)()")
-                        if var then
-                            token = token .. (os.getenv(var) or "")
-                            i = i + endpos - 1 - 1
-                        else
-                            token = token .. ch
-                        end
-                    end
-                else
-                    token = token .. ch
-                end
-                i = i + 1
-            end
-            i = i + 1
-        else
-            while i <= len and not line:sub(i,i):match("%s") do
-                local ch = line:sub(i,i)
-                if ch == "\\" and i < len then
-                    i = i + 1
-                    token = token .. line:sub(i,i)
-                else
-                    token = token .. ch
-                end
-                i = i + 1
-            end
-            token = expand_env(token)
         end
-
-        if token ~= "" then
-            table.insert(tokens, token)
-        end
+        words[#words + 1] = value
+        word, started, word_unquoted_start = {}, false, false
     end
-
-    return tokens
+    local function finish_segment()
+        finish_word()
+        segments[#segments + 1] = words
+        words = {}
+    end
+    local function expansion_at(pos)
+        local rest = line:sub(pos)
+        local name, after = rest:match("^%$%{([%w_?]+)%}()")
+        if name then return os.getenv(name) or "", pos + after - 1 end
+        name, after = rest:match("^%$([%w_?]+)()")
+        if name then return os.getenv(name) or "", pos + after - 1 end
+        return "$", pos + 1
+    end
+    while i <= len do
+        local c = line:sub(i, i)
+        if escaped then
+            word[#word + 1] = c
+            started, escaped = true, false
+        elseif quote == "'" then
+            if c == "'" then quote = nil else word[#word + 1] = c end
+        elseif quote == '"' then
+            if c == '"' then quote = nil
+            elseif c == "\\" and i < len then
+                i = i + 1
+                word[#word + 1] = line:sub(i, i)
+            elseif c == "$" then
+                local value, after = expansion_at(i)
+                word[#word + 1] = value
+                i = after - 1
+            else word[#word + 1] = c end
+        elseif c == "\\" then
+            if not started then word_unquoted_start = false end
+            started, escaped = true, true
+        elseif c == "'" or c == '"' then
+            if not started then word_unquoted_start = false end
+            started, quote = true, c
+        elseif c == "$" then
+            local value, after = expansion_at(i)
+            if not started then word_unquoted_start = false end
+            started = true
+            word[#word + 1] = value
+            i = after - 1
+        elseif c == "|" then finish_segment()
+        elseif c:match("%s") then finish_word()
+        elseif c == "#" and not started then break
+        else
+            if not started then
+                local next_c = line:sub(i + 1, i + 1)
+                word_unquoted_start = c == "~" and (next_c == "" or next_c == "/" or next_c == "|" or next_c:match("%s") ~= nil)
+            end
+            started = true
+            word[#word + 1] = c
+        end
+        i = i + 1
+    end
+    if escaped then word[#word + 1] = "\\" end
+    if quote then return {}, true end
+    finish_segment()
+    return segments, false
 end
 
 ---@param cmd string
@@ -107,7 +120,7 @@ local function find_in_path(cmd)
         return nil
     end
 
-    local path_env = os.getenv("PATH") or "/usr/bin:/bin"
+    local path_env = os.getenv("PATH") or "/usr/ubin:/usr/bin:/bin"
     for dir in path_env:gmatch("[^:]+") do
         local full = dir .. "/" .. cmd
         if fs.exists(full) then return full end
@@ -120,14 +133,13 @@ end
 local builtins = {}
 
 builtins["cd"] = function(args)
-    local target = args[2] or os.getenv("HOME") or "/"
-    target = expand_env(target)
-    if not fs.isDirectory(target) then
-        io.stderr:write("cd: " .. target .. ": No such directory\n")
+    local target = args[2] or home_path() or "/"
+    local cwd, err = process.cwd(target)
+    if not cwd then
+        io.stderr:write("cd: " .. target .. ": " .. (err or "Cannot change directory") .. "\n")
         return 1
     end
-    process.cwd(target)
-    os.setenv("PWD", process.cwd())
+    os.setenv("PWD", cwd)
     return 0
 end
 
@@ -228,12 +240,12 @@ local function exec_external(path, args)
         return 127
     end
 
-    local wait_err = process.wait(pid)
+    local wait_err, status = process.wait(pid)
     if wait_err then
         io.stderr:write(args[1] .. ": process error: " .. tostring(wait_err) .. "\n")
         return 1
     end
-    return 0
+    return type(status) == "number" and status or 0
 end
 
 ---@param tokens string[]
@@ -261,31 +273,141 @@ local function run_command(tokens)
     return exec_external(path, tokens)
 end
 
+local function run_pipeline(segments)
+    if #segments < 2 then return run_command(segments[1] or {}) end
+    for _, args in ipairs(segments) do
+        if #args == 0 then
+            io.stderr:write("sh: syntax error: missing command in pipeline\n")
+            return 2
+        end
+    end
+    local stages = {}
+    for i, args in ipairs(segments) do
+        if builtins[args[1]] then
+            local child_args = { "--builtin", args[1] }
+            for j = 2, #args do child_args[#child_args + 1] = args[j] end
+            stages[i] = { path = "/usr/bin/sh.lua", args = child_args, label = args[1] }
+        else
+            local path = find_in_path(args[1])
+            if not path then
+                io.stderr:write(args[1] .. ": command not found\n")
+                return 127
+            end
+            local child_args = {}
+            for j = 2, #args do child_args[#child_args + 1] = args[j] end
+            stages[i] = { path = path, args = child_args, label = args[1] }
+        end
+    end
+    local pipes = {}
+    for i = 1, #stages - 1 do
+        local rfd, wfd = fs.pipe()
+        if type(rfd) ~= "number" or rfd < 0 or type(wfd) ~= "number" or wfd < 0 then
+            if type(rfd) == "number" and rfd >= 0 then fs.close(rfd) end
+            if type(wfd) == "number" and wfd >= 0 then fs.close(wfd) end
+            for _, pipe in ipairs(pipes) do fs.close(pipe[1]); fs.close(pipe[2]) end
+            io.stderr:write("sh: pipe: failed to create pipe\n")
+            return 1
+        end
+        pipes[i] = { rfd, wfd }
+    end
+    local started, failure = {}, nil
+    for i, stage in ipairs(stages) do
+        local stdio = {}
+        if i > 1 then stdio[0] = pipes[i - 1][1] end
+        if i < #stages then stdio[1] = pipes[i][2] end
+        local pid, err, instance = process.spawn(stage.path, stage.args, stdio)
+        if not pid or pid == -1 then
+            failure = { label = stage.label, error = err }
+            break
+        end
+        if instance == nil then
+            local proc = process.get(pid)
+            instance = proc and proc.instance
+        end
+        started[#started + 1] = { pid = pid, instance = instance }
+    end
+    for _, pipe in ipairs(pipes) do fs.close(pipe[1]); fs.close(pipe[2]) end
+    if failure then
+        io.stderr:write(failure.label .. ": " .. tostring(failure.error or "spawn failed") .. "\n")
+        for _, child in ipairs(started) do
+            local proc = process.get(child.pid)
+            if proc and proc.instance == child.instance then process.kill(child.pid) end
+        end
+        for _, child in ipairs(started) do process.wait(child.pid, child.instance) end
+        return 1
+    end
+    local status = 0
+    for i, child in ipairs(started) do
+        local wait_err, child_status = process.wait(child.pid, child.instance)
+        if wait_err then
+            io.stderr:write(stages[i].label .. ": process error: " .. tostring(wait_err) .. "\n")
+            if i == #started then status = 1 end
+        elseif i == #started then
+            status = type(child_status) == "number" and child_status or 0
+        end
+    end
+    return status
+end
+
+local function run_line(line)
+    local segments, malformed = tokenize(line)
+    if malformed then
+        io.stderr:write("sh: syntax error: unmatched quote\n")
+        return 2
+    end
+    return run_pipeline(segments)
+end
+
 local function get_prompt()
+    local cwd = prompt_path()
     local ps1 = os.getenv("PS1")
     if ps1 and ps1 ~= "" then
-        return expand_prompt(ps1)
+        return expand_env(ps1, function(key)
+            if key == "PWD" then return cwd end
+            return os.getenv(key)
+        end)
     end
 
     local user    = os.getenv("USER") or os.getenv("USERNAME") or "user"
     local host    = os.getenv("HOSTNAME") or "nexus"
-    local cwd     = process.cwd() or "/"
-    local home    = os.getenv("HOME") or "/root"
-
-    if cwd:sub(1, #home) == home then
-        cwd = "~" .. cwd:sub(#home + 1)
-    end
     local suffix  = (os.getenv("UID") == "0") and "# " or "$ "
     return colors.green .. user .. "@" .. host .. colors.reset
         .. ":" .. colors.bright_blue .. cwd .. colors.reset
         .. suffix
 end
 
+local shell_args = { ... }
+if shell_args[1] == "--builtin" then
+    local name = shell_args[2]
+    local args = { name }
+    for i = 3, #shell_args do args[#args + 1] = shell_args[i] end
+    local builtin = builtins[name]
+    local status = 127
+    if builtin then
+        local ok, result = pcall(builtin, args)
+        if ok then status = result or 0
+        else
+            io.stderr:write(name .. ": " .. tostring(result) .. "\n")
+            status = 1
+        end
+    end
+    os.exit(status)
+elseif shell_args[1] == "-c" then
+    local line = shell_args[2] or ""
+    os.exit(run_line(line))
+end
+
 local last_exit = 0
 
 do
-    local home = os.getenv("HOME")
-    if home and home ~= "" then
+    local home = home_path()
+    if home then
+        if shell_args[1] == "-l" then
+            local cwd, err = process.cwd(home)
+            if not cwd then
+                io.stderr:write("sh: " .. home .. ": " .. (err or "Cannot enter home directory") .. "\n")
+            end
+        end
         local profile = fs.concat(home, ".profile.lua")
         if fs.exists(profile) then
             local ok, err = pcall(dofile, profile)
@@ -293,11 +415,8 @@ do
                 io.stderr:write("sh: " .. profile .. ": " .. tostring(err) .. "\n")
             end
         end
-        if not os.getenv("PWD") or os.getenv("PWD") == "" then
-            os.setenv("PWD", home or "/")
-        end
-
     end
+    os.setenv("PWD", process.cwd() or "/")
 end
 
 while true do
@@ -313,9 +432,8 @@ while true do
     line = line:match("^%s*(.-)%s*$")
 
     if line ~= "" then
-        local tokens = tokenize(line)
-        if #tokens > 0 then
-            last_exit = run_command(tokens)
+        last_exit = run_line(line)
+        if last_exit ~= nil then
             os.setenv("?", tostring(last_exit))
         end
     end

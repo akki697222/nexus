@@ -1,3 +1,9 @@
+-- Capture the raw OpenComputers APIs as kernel-private upvalues. Every source
+-- file is concatenated into this one chunk, so all kernel code below resolves
+-- `component`/`computer` to these locals. main.lua scrubs the globals before
+-- any userland code runs; only driver.lua touches `component` directly.
+local component, computer = component, computer
+
 log_buffer = setmetatable({}, {
     __newindex = function(t, k, v)
         if type(k) == "number" then
@@ -25,11 +31,12 @@ do
 end
 
 version = {
-        id = "Nexus 0.1.0-dev-oc_ocelot";
-        name = "Nexus";
-        ver = "0.1.0-dev-oc_ocelot";
-        dist = "Nexus";
-    };
+    id = "Nexus 0.1.0-dev-oc_ocelot";
+    name = "Nexus";
+    ver = "0.1.0-dev-oc_ocelot";
+    dist = "Nexus";
+};
+
 _OSVERSION = config.version.id
 _OSVERSIONSTRING = config.version.ver
 _OSDIST = config.version.dist

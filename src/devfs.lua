@@ -44,13 +44,15 @@ end
 
 ---@param name string
 ---@param driver table
+---@param block? boolean
+---@param perm? integer
 ---@return boolean, string?, vnode?
-function devfs.create(name, driver, block)
+function devfs.create(name, driver, block, perm)
     --printd("creating device " .. name .. " (block=" .. tostring(block) .. ")")
     if devices[name] then
         return false, "Device already exists"
     end
-    local vnode = vfs.createVNode("/dev", name, block and "VBLK" or "VCHR", devfs)
+    local vnode = vfsk.createVNode("/dev", name, block and "VBLK" or "VCHR", devfs, perm)
     devices[name] = { driver = driver, vnode = vnode }
     return true, nil, vnode
 end
@@ -127,7 +129,7 @@ function devfs.read(handle, ...)
     if h.driver.read then
         return h.driver.read(handle, ...)
     end
-    return h.driver
+    return nil, "Operation not supported"
 end
 
 function devfs.write(handle, value)

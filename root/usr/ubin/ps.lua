@@ -114,25 +114,35 @@ local cur_tty  = cur and (cur.tty or -1) or -1
 
 -- -p フィルタ（"1,2,3" や -p 1 -p 2 両対応）
 local pid_set, has_pid = {}, false
-if args.p then
+if type(args.p) == "table" and #args.p > 0 then
     has_pid = true
-    local list = type(args.p) == "table" and args.p or { args.p }
+    local list = args.p
     for _, entry in ipairs(list) do
-        for tok in tostring(entry):gmatch("[^,]+") do
+        local value = tostring(entry)
+        for tok in (value .. ","):gmatch("(.-),") do
             local n = tonumber(tok)
-            if n then pid_set[n] = true end
+            if not n or n < 1 or n % 1 ~= 0 then
+                io.stderr:write("ps: invalid PID: " .. tok .. "\n")
+                os.exit(1)
+            end
+            pid_set[n] = true
         end
     end
 end
 
 -- -U フィルタ
 local uid_set, has_uid = {}, false
-if args.U then
+if type(args.U) == "table" and #args.U > 0 then
     has_uid = true
-    local list = type(args.U) == "table" and args.U or { args.U }
-    for _, name in ipairs(list) do
-        local u = user.getUser(tostring(name))
-        if u then uid_set[u.uid] = true end
+    for _, name in ipairs(args.U) do
+        local value = tostring(name)
+        local numeric_uid = tonumber(value)
+        if numeric_uid and numeric_uid >= 0 and numeric_uid % 1 == 0 then
+            uid_set[numeric_uid] = true
+        else
+            local u = user.getUser(value)
+            if u then uid_set[u.uid] = true end
+        end
     end
 end
 
@@ -141,10 +151,9 @@ for _, proc in ipairs(process.list()) do
     local tty = proc.tty or -1
     local sel
 
-    if has_pid then
-        sel = pid_set[proc.pid] == true
-    elseif has_uid then
-        sel = uid_set[proc.uid] == true
+    if has_pid or has_uid then
+        sel = (has_pid and pid_set[proc.pid] == true)
+            or (has_uid and uid_set[proc.uid] == true)
     elseif args.e then           -- -e / -A : 全プロセス
         sel = true
     elseif args.x then           -- -x [+a] : TTY なしも含む

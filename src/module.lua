@@ -35,7 +35,7 @@ function module.load(path)
         return nil, "Permission Denied"
     end
 
-    local f, err = loadfile(vfs.resolve(path), "bt", util.createEnv())
+    local f, err = loadfile(vfs.resolve(path), "bt", createModuleEnv())
 
     if not f then
         return nil, err or "Unknown Error"

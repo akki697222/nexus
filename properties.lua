@@ -26,6 +26,8 @@ properties.includes = {
     "io.lua",
     "os.lua",
     "system.lua",
+    "driver.lua",
+    "env.lua",
     "main.lua",
 }
 properties.overwrite = true

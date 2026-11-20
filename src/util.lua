@@ -51,11 +51,7 @@ function util.encodeTable(tbl, noreturn)
     if not noreturn then write("return") end
     encode(tbl)
 
-    local result = ""
-    for idx = 1, i do
-        result = result .. buffer[idx]
-    end
-    return result
+    return table.concat(buffer, "", 1, i)
 end
 
 function util.copyTable(tbl)

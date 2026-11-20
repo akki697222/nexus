@@ -41,6 +41,83 @@ kthreads = {}
 
 system.config = config
 
+-- Shutdown state is kernel private. The request is deliberately a single
+-- slot: once accepted, later requests cannot change poweroff into reboot (or
+-- vice versa).
+local shutdown_request
+local metadata_sync_active = false
+local metadata_sync_stopping = false
+
+---@param flush fun()
+---@return boolean|nil
+---@return string|nil
+function system._syncMetadata(flush, final)
+    if metadata_sync_stopping and not final then
+        return nil, "Metadata sync is stopping"
+    end
+    if metadata_sync_active then
+        return nil, "Metadata sync is already active"
+    end
+    metadata_sync_active = true
+    local ok, result, reason = pcall(flush)
+    metadata_sync_active = false
+    if not ok then return nil, result end
+    if result == nil and reason ~= nil then return nil, reason end
+    return result == nil and true or result
+end
+
+---@param reboot boolean
+---@return boolean|nil
+---@return string|nil
+function system.requestShutdown(reboot)
+    if type(reboot) ~= "boolean" then return nil, "Invalid argument" end
+    local proc = process.getCurrent()
+    if not proc or proc.euid ~= 0 then return nil, "Permission denied" end
+    if shutdown_request == nil then shutdown_request = reboot end
+    return true
+end
+
+---@return boolean|nil reboot requested; nil means no request
+---@return string|nil
+function system.shutdownRequested()
+    if process.getCurrentPID() ~= 1 then return nil, "Permission denied" end
+    return shutdown_request
+end
+
+---@return boolean|nil
+---@return string|nil
+function system.finishShutdown()
+    if process.getCurrentPID() ~= 1 then return nil, "Permission denied" end
+    if shutdown_request == nil then return nil, "No shutdown requested" end
+
+    local reboot = shutdown_request
+    metadata_sync_stopping = true
+    while metadata_sync_active do coroutine.yield() end
+
+    local ok, err = system._syncMetadata(function()
+        repeat
+            local flushed, flush_err = vfs.saveMetadata(coroutine.yield)
+            if not flushed then return nil, flush_err end
+        until not vfs._dirty
+        return true
+    end, true)
+    if not ok then
+        metadata_sync_stopping = false
+        shutdown_request = nil
+        return nil, err
+    end
+
+    local called, result, reason = pcall(computer.shutdown, reboot)
+    if not called or result == false or (result == nil and reason ~= nil) then
+        metadata_sync_stopping = false
+        shutdown_request = nil
+        return nil, called and reason or result
+    end
+    shutdown_request = nil
+    metadata_sync_stopping = false
+    return true
+end
+
 function system.printk(...)
     printk(...)
 end

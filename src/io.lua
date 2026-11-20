@@ -1,20 +1,33 @@
 ---@class io
 local io = {}
 
+-- io functions act on descriptors 0/1/2 of the calling process
+local function joinArgs(...)
+    local n = select("#", ...)
+    if n == 1 then return (...) end
+    local parts = {}
+    for i = 1, n do parts[i] = tostring((select(i, ...))) end
+    return table.concat(parts)
+end
+
 function io.write(...)
-    devfs.write(1, ...)
+    return vfs.write(1, joinArgs(...))
 end
 
 function io.read(...)
-    return devfs.read(0, ...)
+    return vfs.read(0, ...)
+end
+
+function io.isatty(fd)
+    return vfs.isatty(fd)
 end
 
 io.stdin = {
     read = function(self, ...)
-        return devfs.read(0, ...)
+        return vfs.read(0, ...)
     end,
     readLine = function(self)
-        return devfs.read(0, "*l")
+        return vfs.read(0, "*l")
     end,
     close = function(self, ...) end,
     tty = true
@@ -24,7 +37,7 @@ io.stdout = {
     read = function(self, ...) return nil end,
     readLine = function(self, ...) return nil end,
     write = function(self, ...)
-        devfs.write(1, ...)
+        return vfs.write(1, joinArgs(...))
     end,
     close = function(self, ...) end,
     tty = true
@@ -34,7 +47,7 @@ io.stderr = {
     read = function(self, ...) return nil end,
     readLine = function(self, ...) return nil end,
     write = function(self, ...)
-        devfs.write(2, ...)
+        return vfs.write(2, joinArgs(...))
     end,
     close = function(self, ...) end,
     tty = true
@@ -49,58 +62,52 @@ end
 ---@return table|nil
 ---@return string|nil
 function io.popen(prog, mode)
-    local pipe_lib = require("pipe")
+    if type(prog) ~= "string" then return nil, "command must be a string" end
     mode = mode or "r"
+    if mode ~= "r" and mode ~= "w" then return nil, "invalid mode" end
 
-    local r, w = pipe_lib.new()
-    local my_handle, child_fd_entry
-
-    local function wrap(handle, flag)
-        local obj = {}
-        if flag == "r" then
-            function obj:read(...)
-                return handle.fs.read(handle, ...)
-            end
-        else
-            function obj:write(...)
-                return handle.fs.write(handle, ...)
-            end
-        end
-        function obj:close() handle.fs.close(handle) end
-
-        return obj
+    local readFd, writeFd = vfs.pipe()
+    if not readFd then return nil, writeFd end
+    local reading = mode == "r"
+    local keep = reading and readFd or writeFd
+    local child = reading and writeFd or readFd
+    local destination = reading and 1 or 0
+    local pid, err, instance = process.spawn("/usr/bin/sh.lua", { "-c", prog }, { [destination] = child })
+    vfs.close(child)
+    if not pid or pid == -1 then
+        vfs.close(keep)
+        return nil, err or "failed to spawn process"
     end
 
-    if mode == "r" then
-        my_handle = wrap(r, "r")
-        child_fd_entry = { fd = w, flag = "w" }
-    elseif mode == "w" then
-        my_handle = wrap(w, "w")
-        child_fd_entry = { fd = r, flag = "r" }
-    else
-        return nil, "invalid mode"
+    local owner = process.getCurrent()
+    local original = descriptor(keep)
+    local closed = false
+    local handle = {}
+    local function isOpen()
+        return not closed and process.getCurrent() == owner and descriptor(keep) == original
     end
 
-    -- Spawn shell to run command
-    -- Using process.exec to run sh.lua directly
-    local pid = process.exec("/usr/bin/sh.lua", { "-c", prog })
-
-    if pid and pid > 0 then
-        local proc = process.get(pid)
-        if proc then
-            -- Inject pipe into child process FD
-            local vnode = { fs = child_fd_entry.fd.fs, name = "popen_pipe", is_pipe = true }
-            local target_fd = (mode == "r") and 2 or 1 -- 2=stdout(index 2 in fd table is fd 1), 1=stdin(index 1 is fd 0)
-
-            proc.fd[target_fd] = {
-                vnode = vnode,
-                fd = child_fd_entry.fd,
-                flag = child_fd_entry.flag
-            }
+    if reading then
+        function handle:read(...)
+            if not isOpen() then return nil, "file is closed" end
+            return vfs.read(keep, ...)
         end
     else
-        return nil, "failed to spawn process"
+        function handle:write(...)
+            if not isOpen() then return nil, "file is closed" end
+            return vfs.write(keep, joinArgs(...))
+        end
     end
 
-    return my_handle
+    function handle:close()
+        if closed or process.getCurrent() ~= owner then return nil, "file is closed" end
+        if isOpen() then vfs.close(keep) end
+        closed = true
+        local waitErr, status = process.wait(pid, instance)
+        if waitErr then return nil, waitErr end
+        if status == 0 then return true, "exit", 0 end
+        return nil, "exit", status
+    end
+
+    return handle
 end
