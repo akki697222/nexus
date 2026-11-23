@@ -1,0 +1,4 @@
+#!/sbin/openoc-run
+description="System logger"
+command=/usr/sbin/syslogd.lua
+type=daemon

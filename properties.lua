@@ -10,6 +10,7 @@ properties.includes = {
     "base.lua",
     "sha2.lua",
     "util.lua",
+    "klog.lua",
     "fbcon.lua",
     "permission.lua",
     "user.lua",

@@ -121,6 +121,33 @@ function system.printk(...)
     printk(...)
 end
 
+-- Adds a message to the system log (dmesg, syslogd). The sender's pid and
+-- uid are filled in by the kernel; the tag defaults to the program name.
+---@param message any
+---@param tag? string
+---@param level? string emerg|alert|crit|err|warning|notice|info|debug
+---@return boolean|nil, string|nil
+function system.log(message, tag, level)
+    if message == nil then return nil, "Missing message" end
+    level = level or "notice"
+    if not klog.LEVELS[level] then return nil, "Invalid level" end
+    local proc = process.getCurrent()
+    if tag ~= nil then tag = tostring(tag):gsub("[^%w%._%-]", ""):sub(1, 32) end
+    if not tag or tag == "" then
+        tag = proc and proc.path and (proc.path:match("([^/]+)$") or ""):gsub("%.lua$", "") or "kernel"
+        if tag == "" then tag = "user" end
+    end
+    if proc and tag == "kernel" then tag = "kernel?" end -- processes cannot pose as the kernel
+    klog.record(level, tag, message, proc and proc.pid, proc and proc.uid)
+    return true
+end
+
+-- Log entries newer than `since` (see klog.read).
+---@param since? integer
+function system.readLog(since)
+    return klog.read(since)
+end
+
 function system.panic(err, reason)
     local proc = process.getCurrent()
     if proc and proc.euid == 0 then

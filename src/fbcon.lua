@@ -128,7 +128,13 @@ printd = function(...)
 end
 
 printk = function(...)
-    write(string.format("[%8.2f] %s\n", computer.uptime(), tostring(... or "")))
+    local msg = tostring(... or "")
+    write(string.format("[%8.2f] %s\n", computer.uptime(), msg))
+    if klog then
+        -- printk from a process (system.printk) is attributed to it
+        local pid = process and process.current and process.current > 0 and process.current or nil
+        klog.record("info", "kernel", msg, pid)
+    end
 end
 
 panic = function(err, reason)

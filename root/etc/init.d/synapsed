@@ -1,0 +1,4 @@
+#!/sbin/openoc-run
+description="Device event daemon"
+command=/usr/sbin/synapsed.lua
+type=daemon
