@@ -1,0 +1,9 @@
+# synapsed rules: <match>... <action>...
+#   match:  type=<component type>  label=<label>  address=<address prefix>
+#   action: mount=<absolute path>  nomount  run=<absolute path>
+# Filesystems without a matching mount/nomount rule go to /mnt/<label>.
+# A run program is started as: program add|remove <address> <type>
+#
+# label=backup    mount=/backup
+# address=1a2b    nomount
+# type=modem      run=/usr/bin/netup.lua

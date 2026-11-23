@@ -771,15 +771,24 @@ function process.resume(proc, ev)
     return false
 end
 
+-- Wakes event waiters that have something to do: queued events, an
+-- expired pull timeout or a due handler (event.wants). Called on every
+-- scheduler pass, with or without a signal, so timeouts fire while idle.
 function process.dispatchWaiting(ev)
+    local wants = event and event.wants
+    local now = wants and computer.uptime()
     local to_run = {}
     for _, proc in ipairs(wait_queue) do
-        if not proc.wait_target and ev and ev.n > 0 then
-            table.insert(to_run, proc)
+        if not proc.wait_target then
+            if wants then
+                if wants(proc, now, ev) then to_run[#to_run + 1] = proc end
+            elseif ev and ev.n > 0 then
+                to_run[#to_run + 1] = proc
+            end
         end
     end
     for _, proc in ipairs(to_run) do
-        dequeue(wait_queue, proc.pid)
+        dequeue_entry(wait_queue, proc)
         proc.status = "running"
         enqueue_run(proc)
     end

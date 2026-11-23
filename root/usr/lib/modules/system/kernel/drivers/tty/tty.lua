@@ -56,11 +56,95 @@ function tty_driver:init()
     self.device = vt.new(self.id)
 end
 
--- Expand the current line to the longest common prefix of the hints returned
--- by the reader's completion callback.
-function tty_driver:complete(hint)
+-- OpenComputers key codes used by the line editor and raw mode.
+local KEY_BACK, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 14, 200, 208, 203, 205
+local KEY_HOME, KEY_END, KEY_DELETE, KEY_PGUP, KEY_PGDN = 199, 207, 211, 201, 209
+local KEY_INSERT = 210
+-- Keys that repeat while held (OC resends key_down without key_up).
+local REPEATABLE = {
+    [KEY_BACK] = true, [KEY_UP] = true, [KEY_DOWN] = true, [KEY_LEFT] = true, [KEY_RIGHT] = true,
+    [KEY_HOME] = true, [KEY_END] = true, [KEY_DELETE] = true, [KEY_PGUP] = true, [KEY_PGDN] = true,
+}
+-- Raw mode: special keys arrive as the usual terminal escape sequences.
+local RAW_SEQUENCES = {
+    [KEY_UP] = "\27[A", [KEY_DOWN] = "\27[B", [KEY_RIGHT] = "\27[C", [KEY_LEFT] = "\27[D",
+    [KEY_HOME] = "\27[H", [KEY_END] = "\27[F", [KEY_INSERT] = "\27[2~", [KEY_DELETE] = "\27[3~",
+    [KEY_PGUP] = "\27[5~", [KEY_PGDN] = "\27[6~",
+}
+local HISTORY_LIMIT = 200
+
+-- ------------------------------------------------------------
+-- Line editor. The input occupies the end of the VT buffer, starting at
+-- column self.startx of the row where reading began; vt wraps it every
+-- `width` columns, so positions follow from plain arithmetic.
+-- ------------------------------------------------------------
+
+function tty_driver:canEdit()
+    local dev = self.device
+    return dev and dev.buf and dev.width and dev.setCursor and not self.flags.disableWriteCharInput
+end
+
+-- VT cursor position of input index p (0 = before the first character).
+function tty_driver:inputPosition(p)
+    local dev = self.device
+    local w = dev.width
+    local endOff = self.startx - 1 + #self.buffer
+    local off = self.startx - 1 + p
+    return off % w + 1, #dev.buf - (endOff // w - off // w)
+end
+
+function tty_driver:placeCursor()
+    if not self:canEdit() then return end
+    self.device:setCursor(self:inputPosition(self.pos))
+end
+
+function tty_driver:toInputEnd()
+    if not self:canEdit() then return end
+    self.device:setCursor(self:inputPosition(#self.buffer))
+end
+
+local function shown(text, mask)
+    return mask and string.rep(mask, #text) or text
+end
+
+-- Replaces the input with `text` and puts the cursor at `pos`.
+function tty_driver:setInput(text, pos, mask)
+    local dev = self.device
+    local echo = self:canEdit()
+    if echo then
+        self:toInputEnd()
+        local wraps = (self.startx - 1 + #self.buffer) // dev.width
+        local erase = #self.buffer + wraps
+        if erase > 0 then dev:backspace(erase) end
+    end
+    self.buffer, self.pos = text, pos
+    if echo then
+        if #text > 0 then dev:write(shown(text, mask)) end
+        self:placeCursor()
+    end
+end
+
+function tty_driver:insertText(text, mask)
+    if text == "" then return end
+    local buffer, pos = self.buffer, self.pos
+    if pos == #buffer then
+        -- appending: no need to redraw what is already shown
+        local echo = self.device and not self.flags.disableWriteCharInput
+        if self:canEdit() then self:toInputEnd() end
+        self.buffer = buffer .. text
+        self.pos = #self.buffer
+        if echo then self.device:write(shown(text, mask)) end
+    else
+        self:setInput(buffer:sub(1, pos) .. text .. buffer:sub(pos + 1), pos + #text, mask)
+    end
+end
+
+-- Expand the word before the cursor to the longest common prefix of the
+-- hints returned by the reader's completion callback.
+function tty_driver:complete(hint, mask)
     if not hint or not self.device then return end
-    local ok, hints = pcall(hint, self.buffer, #self.buffer + 1)
+    local before = self.buffer:sub(1, self.pos)
+    local ok, hints = pcall(hint, before, #before + 1)
     if not ok or type(hints) ~= "table" then return end
 
     local completion
@@ -79,18 +163,107 @@ function tty_driver:complete(hint)
         end
     end
 
-    if not completion or #completion <= #self.buffer then return end
-    if completion:sub(1, #self.buffer) ~= self.buffer then return end
+    if not completion or #completion <= #before then return end
+    if completion:sub(1, #before) ~= before then return end
+    self:insertText(completion:sub(#before + 1), mask)
+end
 
-    local inserted = completion:sub(#self.buffer + 1)
-    self.buffer = completion
-    if not self.flags.disableWriteCharInput then
-        self.device:write(inserted)
+function tty_driver:historyMove(delta, mask)
+    local history = self.history
+    if not history or #history == 0 then return end
+    local index = self.historyIndex
+    if not index then
+        if delta > 0 then return end
+        self.historyDraft = self.buffer
+        index = #history + 1
     end
+    index = index + delta
+    if index < 1 then index = 1 end
+    if index > #history then
+        self.historyIndex = nil
+        local draft = self.historyDraft or ""
+        self:setInput(draft, #draft, mask)
+        return
+    end
+    self.historyIndex = index
+    local entry = history[index]
+    self:setInput(entry, #entry, mask)
+end
+
+function tty_driver:remember(line, mask)
+    local history = self.history
+    if not history or mask or line == "" or not line:find("%S") then return end
+    if history[#history] ~= line then table.insert(history, line) end
+    while #history > (self.historyLimit or HISTORY_LIMIT) do table.remove(history, 1) end
+end
+
+-- Handles one key in canonical mode; returns false when the line is done.
+function tty_driver:editKey(char, key, mask, hint)
+    local buffer, pos = self.buffer, self.pos
+    if char == 13 then
+        self:toInputEnd()
+        self:remember(buffer, mask)
+        self.read_buffer = self.read_buffer .. buffer .. "\n"
+        self.buffer, self.pos = "", 0
+        self.device:write("\n")
+        return false
+    elseif char == 3 then
+        -- Ctrl+C (SIGINT)
+        self:toInputEnd()
+        local proc = process.get(self.in_pid)
+        if proc then table.insert(proc.signals, 2) end
+        self.buffer, self.pos, self.read_buffer = "", 0, ""
+        return false
+    elseif char == 4 then
+        -- Ctrl+D: EOF on an empty line, otherwise hand over what was typed
+        self:toInputEnd()
+        if #buffer > 0 then
+            self.read_buffer = self.read_buffer .. buffer
+            self.buffer, self.pos = "", 0
+        else
+            self.eof = true
+        end
+        return false
+    elseif char == 9 then
+        self:complete(hint, mask)
+    elseif char == 8 or key == KEY_BACK then
+        if pos > 0 then self:setInput(buffer:sub(1, pos - 1) .. buffer:sub(pos + 1), pos - 1, mask) end
+    elseif key == KEY_DELETE then
+        if pos < #buffer then self:setInput(buffer:sub(1, pos) .. buffer:sub(pos + 2), pos, mask) end
+    elseif key == KEY_LEFT then
+        if pos > 0 then self.pos = pos - 1; self:placeCursor() end
+    elseif key == KEY_RIGHT then
+        if pos < #buffer then self.pos = pos + 1; self:placeCursor() end
+    elseif key == KEY_HOME or char == 1 then
+        self.pos = 0; self:placeCursor()
+    elseif key == KEY_END or char == 5 then
+        self.pos = #buffer; self:placeCursor()
+    elseif key == KEY_UP then
+        self:historyMove(-1, mask)
+    elseif key == KEY_DOWN then
+        self:historyMove(1, mask)
+    elseif char == 21 then
+        -- Ctrl+U: delete up to the cursor
+        self:setInput(buffer:sub(pos + 1), 0, mask)
+    elseif char == 23 then
+        -- Ctrl+W: delete the word before the cursor
+        local before = buffer:sub(1, pos):gsub("%S*%s*$", "")
+        self:setInput(before .. buffer:sub(pos + 1), #before, mask)
+    elseif char and char >= 32 and char <= 126 then
+        self:insertText(string.char(char), mask)
+    end
+    return true
 end
 
 function tty_driver:read_pump(mask, hint)
     self.reading = true
+    local canonical = self.flags.canonical and not self.rawRead
+    if canonical and self:canEdit() then
+        -- where the input starts: the cursor, minus what is already typed
+        local w = self.device.width
+        self.pos = #self.buffer
+        self.startx = (self.device.cx - 1 - #self.buffer) % w + 1
+    end
     self.device:setInputCursor(self.in_pid)
     while self.reading do
         local ev = { event.pull() }
@@ -99,72 +272,42 @@ function tty_driver:read_pump(mask, hint)
         local key = ev[4]
 
         if etype == "key_down" then
-            if not self.pressing[key] then
+            local repeating = self.pressing[key] and (self.rawRead or REPEATABLE[key])
+            if not self.pressing[key] or repeating then
                 self.pressing[key] = true
-                self.pressingChars[char] = true
+                if char then self.pressingChars[char] = true end
 
-                if self.flags.canonical then
-                    if char == 9 then
-                        -- Tab (completion)
-                        self:complete(hint)
-                    elseif char == 13 then
-                        -- Enter
-                        self.read_buffer = self.read_buffer .. self.buffer .. "\n"
-                        self.buffer = ""
-                        self.device:write("\n")
-                        self.reading = false
-                    elseif char == 3 then
-                        -- Ctrl+C (SIGINT)
-                        local proc = process.get(self.in_pid)
-                        if proc then
-                            table.insert(proc.signals, 2)
-                        end
-                        self.buffer = ""
-                        self.read_buffer = ""
-                        self.reading = false
-                    elseif char == 4 then
-                        -- Ctrl+D (EOF)
-                        if #self.buffer > 0 then
-                            -- Push buffer without newline
-                            self.read_buffer = self.read_buffer .. self.buffer
-                            self.buffer = ""
-                            self.reading = false
-                        else
-                            -- Real EOF
-                            self.eof = true
-                            self.reading = false
-                        end
-                    elseif char == 8 then
-                        -- Backspace
-                        if #self.buffer > 0 then
-                            self.buffer = self.buffer:sub(1, -2)
-                            if not self.flags.disableWriteCharInput then
-                                self.device:backspace()
-                            end
-                        end
-                    elseif char and char >= 32 and char <= 126 then
-                        local c = string.char(char)
-                        self.buffer = self.buffer .. c
-                        if not self.flags.disableWriteCharInput then
-                            -- handle mask
-                            self.device:write(mask or c)
-                        end
-                    end
-                else
-                    if char and char ~= 0 then
-                        self.read_buffer = self.read_buffer .. string.char(char)
-                        self.reading = false
-                    end
+                if canonical then
+                    self.reading = self:editKey(char, key, mask, hint)
+                elseif self.rawRead and (not char or char == 0) and RAW_SEQUENCES[key] then
+                    self.read_buffer = self.read_buffer .. RAW_SEQUENCES[key]
+                    self.reading = false
+                elseif self.rawRead and char == 27 then
+                    -- a lone Esc, distinct from the start of a sequence
+                    self.read_buffer = self.read_buffer .. "\27\27"
+                    self.reading = false
+                elseif char and char ~= 0 then
+                    self.read_buffer = self.read_buffer .. utf8.char(char)
+                    self.reading = false
                 end
                 if self.reading then self.device:setInputCursor(self.in_pid) end
             end
         elseif etype == "key_up" then
             self.pressing[key] = false
-            self.pressingChars[char] = false
+            if char then self.pressingChars[char] = false end
         elseif etype == "clipboard" then
-            if not self.flags.canonical then
+            if canonical then
+                -- paste into the line, up to the first line break
+                local text = tostring(char or ""):gsub("\r", "")
+                local first, rest = text:match("^([^\n]*)\n?(.*)$")
+                self:insertText((first:gsub("[%c]", "")), mask)
+                if text:find("\n") then
+                    self.reading = self:editKey(13, nil, mask, hint)
+                    if rest ~= "" then self.read_buffer = self.read_buffer .. rest end
+                end
+            else
                 self.read_buffer = self.read_buffer .. char
-                if not self.flags.disableWriteCharInput then
+                if not self.flags.disableWriteCharInput and not self.rawRead then
                     self.device:write(mask or char)
                 end
                 self.reading = false
@@ -268,14 +411,24 @@ function tty_driver:read(...)
     self.eof = false
 
     local formats = table.pack(...)
-    -- A trailing function is a completion callback for line reads. It is not
-    -- a format, so remove it before parsing the format list.
-    local hint
+    -- A trailing options table ({ complete = fn, history = list, raw = bool })
+    -- or a trailing completion function are not formats.
+    local options
+    if formats.n > 0 and type(formats[formats.n]) == "table" then
+        options = formats[formats.n]
+        formats[formats.n] = nil
+        formats.n = formats.n - 1
+    end
+    local hint = options and options.complete
     if formats.n > 0 and type(formats[formats.n]) == "function" then
         hint = formats[formats.n]
         formats[formats.n] = nil
         formats.n = formats.n - 1
     end
+    self.history = options and type(options.history) == "table" and options.history or nil
+    self.historyLimit = options and tonumber(options.historyLimit) or nil
+    self.historyIndex, self.historyDraft = nil, nil
+    self.rawRead = options and options.raw and true or false
     if formats.n == 0 then formats = { "*l", n = 1 } end
 
     local results = {}
@@ -316,6 +469,7 @@ function tty_driver:read(...)
     end
 
     self.in_pid = -1
+    self.history, self.rawRead = nil, false
     return table.unpack(results)
 end
 

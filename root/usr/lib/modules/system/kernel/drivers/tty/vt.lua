@@ -195,6 +195,7 @@ function vt_driver:init()
     gpu.setForeground(0xFFFFFF)
     gpu.setBackground(0x000000)
     gpu.fill(1, 1, self.width, self.height, " ")
+    self:invalidate()
 end
 
 function vt_driver:reset()
@@ -205,7 +206,8 @@ function vt_driver:reset()
     self.buf = { { text = "", fg = {}, bg = {} } }
     self.cx, self.cy = 1, 1
     self.scscroll = 0
-    self.dirty = true
+    self:invalidate()
+    self.cursorOverlay = nil
 
     gpu.freeAllBuffers()
     self.buf_n = gpu.allocateBuffer()
@@ -224,10 +226,11 @@ function vt_driver:clear()
     local gpu = self.gpu
     if not gpu then return end
     
-    self.buf = { text = "", fg = {}, bg = {} }
+    self.buf = { { text = "", fg = {}, bg = {} } }
     self.cx, self.cy = 1, 1
     self.scscroll = 0
-    self.dirty = true
+    self:invalidate()
+    self.cursorOverlay = nil
 
     gpu.setForeground(0xFFFFFF)
     gpu.setBackground(0x000000)
@@ -239,6 +242,126 @@ function vt_driver:read(n) return "" end
 -- ============================================================
 -- write (fixed: use table.insert-style sequence, avoid holes)
 -- ============================================================
+
+local function new_line() return { text = "", fg = {}, bg = {} } end
+
+-- Screen row (1-based) of the current view -> index into self.buf, growing
+-- the buffer when the row is below its last line.
+function vt_driver:rowToLine(row)
+    local offset = #self.line_positions
+    local total = offset + #self.buf
+    local start_line = math.max(1, total - self.height + 1)
+    local idx = start_line + row - 1 - offset
+    if idx < 1 then idx = 1 end
+    while #self.buf < idx do table.insert(self.buf, new_line()) end
+    return idx
+end
+
+-- Writes one character at the cursor, overwriting what is there (padding
+-- with blanks past the end of the line), then advances the cursor.
+function vt_driver:putChar(c)
+    if not self.buf[self.cy] then
+        while #self.buf < self.cy do table.insert(self.buf, new_line()) end
+    end
+    local line = self.buf[self.cy]
+    local text = line.text or ""
+    local cx = self.cx
+    if cx > self.width then
+        if self.alt then return end -- no autowrap on the alternate screen
+        self.cx, cx = 1, 1
+        table.insert(self.buf, self.cy + 1, new_line())
+        self.cy = self.cy + 1
+        line, text = self.buf[self.cy], ""
+    end
+    if cx <= #text then
+        text = text:sub(1, cx - 1) .. c .. text:sub(cx + 1)
+    else
+        for i = #text + 1, cx - 1 do
+            line.fg[i], line.bg[i] = 0xFFFFFF, 0x000000
+        end
+        text = text .. string.rep(" ", cx - 1 - #text) .. c
+    end
+    line.text = text
+    line.fg[cx] = self.fg
+    line.bg[cx] = self.bg
+    self.cx = cx + 1
+    if self.cx > self.width and not self.alt then
+        self.cx = 1
+        table.insert(self.buf, self.cy + 1, new_line())
+        self.cy = self.cy + 1
+    end
+end
+
+local function sgr(self, seq)
+    if seq == "" then seq = "0" end
+    for code in seq:gmatch("%d+") do
+        local n = tonumber(code)
+        if n == 0 then
+            self.fg, self.bg, self.inverse = 0xFFFFFF, 0x000000, false
+        elseif n == 7 then
+            if not self.inverse then self.fg, self.bg, self.inverse = self.bg, self.fg, true end
+        elseif n == 27 then
+            if self.inverse then self.fg, self.bg, self.inverse = self.bg, self.fg, false end
+        elseif n == 39 then
+            self.fg = 0xFFFFFF
+        elseif n == 49 then
+            self.bg = 0x000000
+        elseif (n >= 40 and n <= 47) or (n >= 100 and n <= 107) then
+            self.bg = ansi_colors[tostring(n - 10)] or self.bg
+        elseif ansi_colors[code] then
+            self.fg = ansi_colors[code]
+        end
+    end
+end
+
+-- CSI sequences: SGR colors (m), cursor position (H/f), erase display (J),
+-- erase line (K), alternate screen (?1049h/l) and cursor visibility (?25h/l).
+function vt_driver:csi(seq, final)
+    if final == "m" then
+        sgr(self, seq)
+    elseif final == "H" or final == "f" then
+        local row, col = seq:match("^(%d*);?(%d*)$")
+        row = math.max(1, math.min(tonumber(row) or 1, self.height))
+        col = math.max(1, math.min(tonumber(col) or 1, self.width))
+        self.cy = self:rowToLine(row)
+        self.cx = col
+    elseif final == "K" then
+        local line = self.buf[self.cy]
+        if line and (seq == "" or seq == "0") then
+            line.text = line.text:sub(1, self.cx - 1)
+            for i = self.cx, #line.fg do line.fg[i], line.bg[i] = nil, nil end
+        elseif line and seq == "2" then
+            self.buf[self.cy] = new_line()
+        end
+    elseif final == "J" and (seq == "2" or seq == "3") then
+        if self.alt then
+            self.buf = {}
+            for _ = 1, self.height do table.insert(self.buf, new_line()) end
+        else
+            self.buf = { new_line() }
+        end
+        self.cx, self.cy = 1, 1
+        self:invalidate()
+    elseif final == "h" and seq == "?1049" and not self.alt then
+        self.saved = { buf = self.buf, line_positions = self.line_positions, cx = self.cx, cy = self.cy,
+            scscroll = self.scscroll, fg = self.fg, bg = self.bg }
+        self.alt = true
+        self.buf = {}
+        for _ = 1, self.height do table.insert(self.buf, new_line()) end
+        self.line_positions = {}
+        self.cx, self.cy, self.scscroll = 1, 1, 0
+        self:invalidate()
+    elseif final == "l" and seq == "?1049" and self.alt then
+        local saved = self.saved
+        self.alt, self.saved = false, nil
+        self.buf, self.line_positions = saved.buf, saved.line_positions
+        self.cx, self.cy, self.scscroll = saved.cx, saved.cy, saved.scscroll
+        self.fg, self.bg = saved.fg, saved.bg
+        self:invalidate()
+    elseif seq == "?25" and (final == "h" or final == "l") then
+        self.cursorHidden = final == "l"
+    end
+end
 
 function vt_driver:write(...)
     local text = tostring(table.concat({...}) or "")
@@ -254,60 +377,30 @@ function vt_driver:write(...)
             while j <= len do
                 local ch = text:sub(j, j)
                 if ch:match("[%@A-Za-z]") then
-                    local seq = text:sub(i + 2, j - 1)
-                    if ch == "m" then
-                        if seq == "" then
-                            self.fg = 0xFFFFFF
-                            self.bg = 0x000000
-                        else
-                            for code in seq:gmatch("%d+") do
-                                code = tonumber(code)
-                                if code == 0 then
-                                    self.fg = 0xFFFFFF
-                                    self.bg = 0x000000
-                                elseif ansi_colors[tostring(code)] then
-                                    self.fg = ansi_colors[tostring(code)]
-                                end
-                            end
-                        end
-                    end
-                    i = j + 1
+                    self:csi(text:sub(i + 2, j - 1), ch)
                     break
                 end
                 j = j + 1
             end
+            i = j + 1
         elseif c == "\r" then
             self.cx = 1
             i = i + 1
         elseif c == "\n" then
             self.cx = 1
-            table.insert(self.buf, { text = "", fg = {}, bg = {} })
-            self.cy = #self.buf
+            if self.cy < #self.buf then
+                self.cy = self.cy + 1
+            else
+                table.insert(self.buf, new_line())
+                self.cy = #self.buf
+            end
             i = i + 1
         elseif c == "\t" then
             local space = 4 - (self.cx - 1) % 4
-            for _ = 1, space do self:write(" ") end
+            for _ = 1, space do self:putChar(" ") end
             i = i + 1
         else
-            -- ensure current line exists as sequence element
-            if not self.buf[self.cy] then
-                -- if somehow cy is out of range, append empty lines until it's valid
-                while #self.buf < self.cy do
-                    table.insert(self.buf, { text = "", fg = {}, bg = {} })
-                end
-            end
-
-            local line = self.buf[self.cy]
-            line.text = (line.text or "") .. c
-            line.fg[self.cx] = self.fg
-            line.bg[self.cx] = self.bg
-
-            self.cx = self.cx + 1
-            if self.cx > self.width then
-                self.cx = 1
-                table.insert(self.buf, { text = "", fg = {}, bg = {} })
-                self.cy = #self.buf
-            end
+            self:putChar(c)
             i = i + 1
         end
     end
@@ -356,7 +449,7 @@ function vt_driver:updateCursor()
         local owner = process.get(self.cursorPid)
         if not owner or owner.instance ~= self.cursorInstance then
             self.cursorPid = nil
-        elseif self.scscroll == 0 and event.getForeground() == self.cursorPid
+        elseif self.scscroll == 0 and not self.cursorHidden and event.getForeground() == self.cursorPid
             and math.floor((computer.uptime() - self.cursorSince) / CURSOR_HALF_PERIOD) % 2 == 0 then
             x = self.cx
             y = #self.line_positions + self.cy - (self.screenStart or 1) + 1
@@ -374,14 +467,59 @@ function vt_driver:updateCursor()
 
     local activeBuffer = gpu.getActiveBuffer()
     if activeBuffer ~= 0 then gpu.setActiveBuffer(0) end
+    -- block cursor: the character under it in inverted colors
+    local line = self.buf[self.cy]
+    local ch = line and line.text:sub(self.cx, self.cx) or ""
+    if ch == "" then ch = " " end
+    local cellFg = line and line.fg[self.cx] or self.fg
+    local cellBg = line and line.bg[self.cx] or 0x000000
+    if ch == " " then cellFg = self.fg end
     local background, palette = gpu.getBackground()
-    gpu.setBackground(self.fg)
-    gpu.fill(x, y, 1, 1, " ")
+    local foreground = gpu.setForeground(cellBg)
+    gpu.setBackground(cellFg)
+    gpu.set(x, y, ch)
     gpu.setBackground(background, palette)
+    if foreground then gpu.setForeground(foreground) end
     if activeBuffer ~= 0 then gpu.setActiveBuffer(activeBuffer) end
     self.cursorOverlay = { x = x, y = y }
 end
 
+-- Color runs of a line: { x, text, fg, bg } per stretch of equal colors,
+-- plus a signature that identifies what the row looks like once drawn.
+local function line_runs(line, width)
+    local runs, sig = {}, {}
+    local text = line and line.text or ""
+    local n = math.min(#text, width)
+    local fgs, bgs = line and line.fg, line and line.bg
+    local x = 1
+    while x <= n do
+        local fg = fgs and fgs[x] or 0xFFFFFF
+        local bg = bgs and bgs[x] or 0x000000
+        local e = x
+        while e < n do
+            local nfg = fgs and fgs[e + 1] or 0xFFFFFF
+            local nbg = bgs and bgs[e + 1] or 0x000000
+            if nfg ~= fg or nbg ~= bg then break end
+            e = e + 1
+        end
+        local piece = text:sub(x, e)
+        runs[#runs + 1] = { x, piece, fg, bg }
+        sig[#sig + 1] = x .. ":" .. fg .. ":" .. bg .. ":" .. piece
+        x = e + 1
+    end
+    return runs, table.concat(sig, "\0")
+end
+
+-- Forget what the off-screen buffer holds; the next update redraws all rows.
+function vt_driver:invalidate()
+    self.drawn = nil
+    self.drawnStart = nil
+    self.dirty = true
+end
+
+-- Redraws only the rows whose content changed since the last update, one
+-- gpu.set per color run, shifts the off-screen buffer with gpu.copy when
+-- the view scrolled, and blits only the changed rows to the screen.
 function vt_driver:update()
     if self.updating then return end
     if not self.dirty then
@@ -396,10 +534,15 @@ function vt_driver:update()
         return
     end
 
-    -- Scroll out old lines
+    -- Scroll out old lines (the alternate screen keeps no scrollback)
     while #self.buf > self.height + 1 do
         local line = self.buf[1]
         if not line then break end
+        if self.alt then
+            table.remove(self.buf, 1)
+            self.cy = math.max(1, self.cy - 1)
+            goto continue
+        end
 
         local str = serialize_line(line)
         local pos, len = append_line_to_file(self, str)
@@ -413,12 +556,14 @@ function vt_driver:update()
 
         table.remove(self.buf, 1)
         self.cy = math.max(1, math.min(self.cy - 1, #self.buf + 1))
+        ::continue::
     end
 
+    local width, height = self.width, self.height
     local offset = #self.line_positions
     local current_buf_size = #self.buf
     local total_lines = offset + current_buf_size
-    local start_line = math.max(1, total_lines - self.height + 1 - self.scscroll)
+    local start_line = math.max(1, total_lines - height + 1 - self.scscroll)
     self.screenStart = start_line
 
     local old_buf_n = nil
@@ -427,83 +572,141 @@ function vt_driver:update()
         gpu.setActiveBuffer(self.buf_n)
     end
 
-    gpu.setForeground(0xFFFFFF)
-    gpu.setBackground(0x000000)
-    gpu.fill(1, 1, self.width, self.height, " ")
+    local debugRow = system.config.debug and height or nil
+    local vtDebugRow = system.config.console_vt_debug and 1 or nil
 
-    local current_fg = -1
-    local current_bg = -1
+    -- Scrolled by a few rows: move what is already drawn instead of
+    -- redrawing it. Logical line L sits on row L - start_line + 1.
+    local drawn = self.drawn
+    if drawn and self.drawnStart and self.drawnStart ~= start_line then
+        local shift = start_line - self.drawnStart
+        if math.abs(shift) < height then
+            if shift > 0 then
+                gpu.copy(1, shift + 1, width, height - shift, 0, -shift)
+            else
+                gpu.copy(1, 1, width, height + shift, 0, -shift)
+            end
+            local moved = {}
+            for sy = 1, height do
+                local from = sy + shift
+                if from >= 1 and from <= height then moved[sy] = drawn[from] end
+            end
+            drawn = moved
+            self.minDirtyRow, self.maxDirtyRow = 1, height
+        else
+            drawn = nil
+        end
+    end
+    local current_fg, current_bg = -1, -1
+    local fullClear = false
+    if not drawn then
+        -- Nothing reusable: clear once instead of row by row.
+        drawn = {}
+        self.minDirtyRow, self.maxDirtyRow = 1, height
+        current_fg, current_bg = 0xFFFFFF, 0x000000
+        gpu.setForeground(current_fg)
+        gpu.setBackground(current_bg)
+        gpu.fill(1, 1, width, height, " ")
+        fullClear = true
+    end
 
-    -- Batch open the file for the entire update
-    local f = fs.open("/tmp/vtbuf", "r")
+    local f
+    local minRow, maxRow = self.minDirtyRow, self.maxDirtyRow
+    self.minDirtyRow, self.maxDirtyRow = nil, nil
 
-    for sy = 1, self.height do
+    for sy = 1, height do
         local logical_line_idx = start_line + sy - 1
         local line = nil
 
         if logical_line_idx >= 1 and logical_line_idx <= total_lines then
             if logical_line_idx <= offset then
                 local entry = self.line_positions[logical_line_idx]
-                if entry and f then
-                    f:seek("set", entry.pos)
-                    local data = f:read(entry.len)
-                    if data then line = parse_line_from_data(data) end
+                if entry then
+                    f = f or fs.open("/tmp/vtbuf", "r") or false
+                    if f then
+                        f:seek("set", entry.pos)
+                        local data = f:read(entry.len)
+                        if data then line = parse_line_from_data(data) end
+                    end
                 end
             else
-                local buf_idx = logical_line_idx - offset
-                line = self.buf[buf_idx]
+                line = self.buf[logical_line_idx - offset]
             end
         end
 
-        if line and line.text and #line.text > 0 then
-            local text_len = #line.text
-            local draw_width = math.min(text_len, self.width)
-            for x = 1, draw_width do
-                local fg = line.fg and line.fg[x] or 0xFFFFFF
-                local bg = line.bg and line.bg[x] or 0x000000
-                if current_fg ~= fg then
-                    current_fg = fg
+        local runs, sig = line_runs(line, width)
+        if sy == debugRow then sig = sig .. "\0DEBUG" end
+        if fullClear and sig == "" and sy ~= vtDebugRow then
+            drawn[sy] = sig -- already blank
+        elseif drawn[sy] ~= sig or sy == vtDebugRow then
+            if not fullClear then
+                if current_fg ~= 0xFFFFFF then
+                    current_fg = 0xFFFFFF
                     gpu.setForeground(current_fg)
                 end
-                if current_bg ~= bg then
-                    current_bg = bg
+                if current_bg ~= 0x000000 then
+                    current_bg = 0x000000
                     gpu.setBackground(current_bg)
                 end
-                gpu.set(x, sy, line.text:sub(x, x))
+                gpu.fill(1, sy, width, 1, " ")
             end
+            for _, run in ipairs(runs) do
+                if current_fg ~= run[3] then
+                    current_fg = run[3]
+                    gpu.setForeground(current_fg)
+                end
+                if current_bg ~= run[4] then
+                    current_bg = run[4]
+                    gpu.setBackground(current_bg)
+                end
+                gpu.set(run[1], sy, run[2])
+            end
+            if sy == debugRow then
+                current_fg, current_bg = 0xFFFFFF, 0xFF0000
+                gpu.setForeground(current_fg)
+                gpu.setBackground(current_bg)
+                gpu.set(width - 4, height, "DEBUG")
+            end
+            drawn[sy] = sig
+            if not minRow or sy < minRow then minRow = sy end
+            if not maxRow or sy > maxRow then maxRow = sy end
         end
     end
 
     if f then f:close() end
 
-    if system.config.console_vt_debug then
+    if vtDebugRow then
         local vtbuf_size = 0
         vtbuf_size = (fs.size and fs.size("/tmp/vtbuf")) or 0
         local debug_str = string.format(
             "CX:%d CY:%d W:%d H:%d BUF_N:%d LP:%d SCR:%d DIRTY:%s BUF:%d SIZE:%d",
-            self.cx, self.cy, self.width, self.height, (self.buf_n or -1), #self.line_positions,
+            self.cx, self.cy, width, height, (self.buf_n or -1), #self.line_positions,
             self.scscroll, tostring(self.dirty), #self.buf, vtbuf_size
         )
 
         gpu.setForeground(0xFF0000)
         gpu.setBackground(0x000000)
         gpu.set(1, 1, debug_str)
+        drawn[1] = nil
     end
 
-    if system.config.debug then
-        gpu.setForeground(0xFFFFFF)
-        gpu.setBackground(0xFF0000)
-        gpu.set(self.width - 4, self.height, "DEBUG")
-    end
+    self.drawn = drawn
+    self.drawnStart = start_line
 
-    gpu.bitblt(0, 1, 1, self.width, self.height + 1, self.buf_n, 1, 1)
+    if minRow then
+        gpu.bitblt(0, 1, minRow, width, maxRow - minRow + 1, self.buf_n, 1, minRow)
+        -- A blinking cursor cell inside the blitted rows was overwritten.
+        local overlay = self.cursorOverlay
+        if overlay and overlay.y >= minRow and overlay.y <= maxRow then
+            self.cursorOverlay = nil
+        end
+    end
     if gpu.setActiveBuffer then
         gpu.setActiveBuffer(old_buf_n)
     end
 
     self.dirty = false
     self.updating = false
-    self.cursorOverlay = nil
     self:updateCursor()
 end
 
