@@ -15,7 +15,18 @@ local event
 local harness = [[
 local input, output, errors = "", {}, {}
 local commands = {}
-local files = { ["/data"] = ("abc\0\255xyz\n"):rep(4000) }
+local files = {
+    ["/data"] = ("abc\0\255xyz\n"):rep(4000),
+    ["/lines"] = "first\nsecond\nlast",
+    ["/script"] = "#!/bin/sh\r\n"
+        .. "label=script\r\n"
+        .. "echo \"$label:$#:$0\" > \"$1\"\r\n"
+        .. "cat </lines | cat >>\"$1\"\r\n"
+        .. "exit 7\r\n"
+        .. "echo unreachable\r\n",
+    ["/stdin-script"] = "echo \"$1:$#\"",
+    ["/broken-script"] = "echo before\necho >\necho after\n",
+}
 
 event = { removeQueue = function() end }
 printk = function(message) errors[#errors + 1] = message end
@@ -44,18 +55,36 @@ vfs.attributes = function() return { mode = 755, uid = 0, gid = 0 } end
 vfs.exists = function(path) return commands[path] ~= nil or files[path] ~= nil end
 vfs.isDirectory = function() return false end
 vfs.can = function() return true end
-vfs.open = function(path)
-    local data = files[path]
-    if not data then return nil, "No such file" end
-    local offset = 1
+config = { read_bytes = 8 }
+local storage = {
+    read = function(handle, size)
+        local data = files[handle.path]
+        if handle.offset > #data then return nil end
+        local chunk = data:sub(handle.offset, handle.offset + size - 1)
+        handle.offset = handle.offset + #chunk
+        return chunk
+    end,
+    write = function(handle, text)
+        files[handle.path] = files[handle.path] .. text
+        return true
+    end,
+    close = function() end,
+    seek = function(handle, whence, offset)
+        local base = whence == "set" and 0 or handle.offset - 1
+        handle.offset = base + offset + 1
+        return handle.offset - 1
+    end,
+}
+vfs.open = function(path, mode)
+    mode = mode or "r"
+    if mode:find("r") and not files[path] then return nil, "No such file" end
+    if mode:find("w") or not files[path] then files[path] = "" end
+    local d = { fs = storage, fd = { path = path, offset = 1 }, flag = mode, ref = 1, vnode = { type = "VREG" } }
+    local fd = allocFd(fdTable(), d)
     return {
-        read = function(_, size)
-            if offset > #data then return nil end
-            local chunk = data:sub(offset, offset + size - 1)
-            offset = offset + #chunk
-            return chunk
-        end,
-        close = function() end,
+        fd = function() return fd end,
+        read = function(_, size) return vfs.read(fd, size) end,
+        close = function() return vfs.close(fd) end,
     }
 end
 
@@ -86,6 +115,7 @@ commands["/usr/bin/sh.lua"] = shellSource
 commands["/usr/ubin/cat.lua"] = catSource
 commands["/usr/bin/early.lua"] = function() return 7 end
 commands["/usr/bin/input.lua"] = function() input = assert(io.read("*a")) end
+commands["/usr/bin/readline.lua"] = function() io.write(assert(io.read()), "\n") end
 commands["/usr/bin/blocked.lua"] = true
 commands["/usr/bin/diagnose.lua"] = function()
     io.stderr:write("diagnostic")
@@ -94,6 +124,15 @@ end
 
 local completed = false
 commands["/test"] = function()
+    local inputFile = assert(vfs.open("/lines", "r"))
+    local inputFd = inputFile:fd()
+    local duplicate = assert(vfs.dup(inputFd, 8))
+    assert(duplicate >= 8 and vfs.read(inputFd) == "first")
+    assert(vfs.seek(duplicate, "cur", 0) == 6)
+    assert(vfs.read(duplicate, "*L") == "second\n")
+    assert(vfs.read(inputFd, "*a") == "last")
+    assert(vfs.close(duplicate) and inputFile:close())
+
     local pipe = assert(io.popen("echo abc | cat | cat"))
     assert(pipe:read("*a") == "abc\n")
     assert(pipe:close())
@@ -122,6 +161,32 @@ commands["/test"] = function()
     local failed, kind, status = pipe:close()
     assert(failed == nil and kind == "exit" and status ~= 0)
     assert(table.concat(errors, "\n"):find("Test load failure", 1, true))
+
+    pipe = assert(io.popen("cat </data | cat >/written"))
+    assert(pipe:read("*a") == "" and pipe:close())
+    assert(files["/written"] == files["/data"])
+
+    pipe = assert(io.popen("echo more >>/written"))
+    assert(pipe:read("*a") == "" and pipe:close())
+    assert(files["/written"] == files["/data"] .. "more\n")
+
+    pipe = assert(io.popen("readline </lines | cat"))
+    assert(pipe:read("*a") == "first\n" and pipe:close())
+
+    pipe = assert(io.popen("sh /script /script-out"))
+    assert(pipe:read("*a") == "")
+    local scriptOk, scriptReason, scriptStatus = pipe:close()
+    assert(scriptOk == nil and scriptReason == "exit" and scriptStatus == 7)
+    assert(files["/script-out"] == "script:1:/script\n" .. files["/lines"])
+
+    pipe = assert(io.popen("cat /stdin-script | sh -s argument"))
+    assert(pipe:read("*a") == "argument:1\n" and pipe:close())
+
+    pipe = assert(io.popen("sh /broken-script"))
+    assert(pipe:read("*a") == "before\n")
+    local syntaxOk, syntaxReason, syntaxStatus = pipe:close()
+    assert(syntaxOk == nil and syntaxReason == "exit" and syntaxStatus == 2)
+    assert(table.concat(errors, "\n"):find("/broken-script:2: syntax error", 1, true))
 
     for index in pairs(process.getCurrent().fd) do assert(index <= 3) end
     completed = true

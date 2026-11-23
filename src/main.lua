@@ -52,6 +52,7 @@ local function main()
     -- Mount root
     do
         local boot = computer.getBootAddress()
+        printd("bootaddr: " .. boot)
         local s, e = vfs.mount(boot, "/")
         if not s then
             printk("mount: " .. e)
@@ -138,7 +139,7 @@ local function main()
     end
 
     -- initialize tty
-    do
+    if not config.console_force_framebuffer then
         local tty
         local s, e = xpcall(function()
             module.autoload()

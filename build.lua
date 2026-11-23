@@ -17,12 +17,12 @@ local function expand_properties(tbl)
 end
 
 local function copyFile(srcPath, dstPath)
-    local srcFile, err = io.open(srcPath, "r")
+    local srcFile, err = io.open(srcPath, "rb")
     if not srcFile then
         return nil, "Failed to open source file: " .. err
     end
 
-    local dstFile, err = io.open(dstPath, "w+")
+    local dstFile, err = io.open(dstPath, "w+b")
     if not dstFile then
         srcFile:close()
         return nil, "Failed to open destination file: " .. err
@@ -96,6 +96,20 @@ end
 outFile:write(source)
 outFile:close()
 
+if props.minify then
+    os.execute("luamin -f "..outputFile.." > .tmp && move /Y .tmp "..outputFile)
+end
+
+local kernelImage = outputFile
+if props.compress then
+    print("Compressing kernel image with LibDeflate (gzip)...")
+    local packed = os.execute("lua tools/pack_kernel.lua \"" .. outputFile .. "\" \"" .. outputFile .. ".gz\"")
+    if packed ~= 0 and packed ~= true then
+        error("Failed to compress kernel image")
+    end
+    kernelImage = outputFile .. ".gz"
+end
+
 if props.overwrite then
     local bootDeploy = "..\\ocelot\\boot"
 
@@ -127,10 +141,11 @@ end
 -- after the sync: overwrite mode starts from an empty ../ocelot/boot, so
 -- boot/ only exists once ./root has been copied
 os.execute("if not exist \"..\\ocelot\\boot\\boot\" mkdir \"..\\ocelot\\boot\\boot\"")
-print("Move: " .. outputFile .. " to ../ocelot/boot/boot/kernel.lua")
-local copied, copyErr = copyFile(outputFile, "../ocelot/boot/boot/kernel.lua")
+local kernelTarget = props.compress and "kernel.lua.gz" or "kernel.lua"
+print("Move: " .. kernelImage .. " to ../ocelot/boot/boot/" .. kernelTarget)
+local copied, copyErr = copyFile(kernelImage, "../ocelot/boot/boot/" .. kernelTarget)
 if not copied then
-    print("Warning: Failed to copy kernel.lua: " .. (copyErr or ""))
+    print("Warning: Failed to copy " .. kernelTarget .. ": " .. (copyErr or ""))
 end
 
 if deployToOC then
@@ -138,10 +153,10 @@ if deployToOC then
     
     os.execute("if not exist \"" .. ocDeploy .. "\\boot\" mkdir \"" .. ocDeploy .. "\\boot\"")
     
-    print("Move: " .. outputFile .. " to " .. ocDeploy .. "/boot/kernel.lua")
-    local ok, err = copyFile(outputFile, ocDeploy .. "\\boot\\kernel.lua")
+    print("Move: " .. kernelImage .. " to " .. ocDeploy .. "/boot/" .. kernelTarget)
+    local ok, err = copyFile(kernelImage, ocDeploy .. "\\boot\\" .. kernelTarget)
     if not ok then
-        print("Warning: Failed to copy kernel.lua to OC: " .. (err or ""))
+        print("Warning: Failed to copy " .. kernelTarget .. " to OC: " .. (err or ""))
     end
 
     print("Deploying ./root to " .. ocDeploy .. "...")

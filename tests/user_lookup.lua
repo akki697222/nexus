@@ -4,6 +4,8 @@ local source = sourceFile:read("*a")
 sourceFile:close()
 
 local current = { uid = 100, euid = 100 }
+local modes = { ["/etc/passwd"] = 644, ["/etc/shadow"] = 400 }
+local createdRootHome = 0
 local env = setmetatable({
     process = { getCurrent = function() return current end },
     util = {
@@ -14,6 +16,14 @@ local env = setmetatable({
         end,
     },
     vfs = {
+        exists = function(path) return modes[path] ~= nil end,
+        makeDirectory = function(path)
+            assert(path == "/root" and modes[path] == nil)
+            createdRootHome = createdRootHome + 1
+            modes[path] = 755
+            return true
+        end,
+        chmod = function(path, mode) modes[path] = mode end,
         open = function(path, mode)
             assert(path == "/etc/passwd" and mode == "r")
             return {
@@ -51,5 +61,11 @@ current.uid, current.euid = 100, 0
 assert(user.getCurrent().uid == 100 and user.checkRoot())
 current = nil
 assert(user.getCurrent() == nil and not user.checkRoot())
+
+user.init()
+assert(createdRootHome == 1 and modes["/root"] == 700)
+modes["/root"] = 750
+user.init()
+assert(createdRootHome == 1 and modes["/root"] == 750)
 
 print("user lookup tests passed")

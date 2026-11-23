@@ -31,4 +31,7 @@ properties.includes = {
     "main.lua",
 }
 properties.overwrite = true
+properties.minify = false
+-- gzip-compress the kernel image (requires LibDeflate in root/usr/lib)
+properties.compress = false
 return properties

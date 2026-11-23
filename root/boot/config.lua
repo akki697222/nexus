@@ -1,20 +1,21 @@
----@class onix_config
+---@class nexus_config
 local config = {
     -- General
     debug = true;
-    version = {
-        id = "Nexus 0.1.0-dev-oc_ocelot";
+    -- Kernel
+    kernel_panic_bsod = false;
+    kernel_version = {
+        id = "Nexus 0.0.3-dev-oc";
         name = "Nexus";
-        ver = "0.1.0-dev-oc_ocelot";
+        ver = "0.0.3-dev-oc";
         dist = "Nexus";
     };
     -- Console
     console_force_framebuffer = false;
+    console_framebuffer_minimumres = false;
     console_vt_debug = false;
-    -- Kernel
-    bsod = false;
     -- Filesystem
-    read_bytes = math.huge;
+    filesystem_read_bytes = math.huge;
 }
 
 return config

@@ -1,6 +1,7 @@
 local argparse = require("argparse")
 local fs = require("filesystem")
 local process = require("process")
+local serviceCatalog = require("openoc.service")
 
 local parser = argparse("rc-update", "Manage OpenOC service registration for boot")
 parser:command_target("action")
@@ -58,8 +59,8 @@ local registration = fs.attributes(marker)
 if registration and registration.type ~= "VREG" then fail("Invalid registration at " .. marker) end
 
 if args.action == "add" then
-    local definition = fs.attributes(fs.concat("/etc/init.d", args.service .. ".lua"))
-    if not definition or definition.type ~= "VREG" then fail("Unknown service: " .. args.service) end
+    local definition, err = serviceCatalog.find(args.service)
+    if not definition then fail("Unknown service: " .. args.service .. (err and (": " .. tostring(err)) or "")) end
     if not registration then
         if not fs.isDirectory(directory) then
             local ok, err = fs.makeDirectory(directory)

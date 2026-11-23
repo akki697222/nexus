@@ -37,6 +37,7 @@ end
 ---@field desc string
 ---@field vendor string
 ---@field product string
+---@field node? string registered name under /dev
 
 ---@class device_manifest_cpu : device_manifest
 ---@field clock string
@@ -160,21 +161,32 @@ end
 ---@return table<string, device_manifest> # address = manifest
 function device.list()
     local result = {}
-    for id, entry in pairs(system_devices) do result[id] = util.copyTable(entry) end
+    for id, entry in pairs(system_devices) do
+        result[id] = util.copyTable(entry)
+        -- Device names are identifiers only. The snapshot never exposes the
+        -- internal map or the devfs driver object.
+        result[id].node = deviceNodes[id]
+    end
     return result
 end
 
 ---@param type device_type
 ---@return device_manifest?
 function device.getFromType(type)
-    for _, dev in pairs(system_devices) do
+    for id, dev in pairs(system_devices) do
         if dev.type == type then
-            return util.copyTable(dev)
+            local result = util.copyTable(dev)
+            result.node = deviceNodes[id]
+            return result
         end
     end
 end
 
 function device.get(addr)
     local entry = system_devices[addr]
-    if entry then return util.copyTable(entry) end
+    if entry then
+        local result = util.copyTable(entry)
+        result.node = deviceNodes[addr]
+        return result
+    end
 end

@@ -52,8 +52,12 @@ local function passwdEntryByUID(content, uid)
             "^([^:]+):([^:]*):([^:]+):([^:]+):([^:]*):([^:]*):([^:]*)$")
         if tonumber(entry_uid) == uid then
             return {
-                username = name, uid = tonumber(entry_uid), gid = tonumber(gid),
-                gecos = gecos, home = home, shell = shell,
+                username = name,
+                uid = tonumber(entry_uid),
+                gid = tonumber(gid),
+                gecos = gecos,
+                home = home,
+                shell = shell,
             }
         end
     end
@@ -68,9 +72,9 @@ if not root_user then fail("root account is unavailable") end
 
 -- Load the bundled parser only after checking that its fixed system path is
 -- root-owned and not writable by group or others. Never use require's search path.
-local argparse_source, argparse_error = readTrustedFile("/usr/lib/argparse.lua")
+local argparse_source, argparse_error = readTrustedFile("/usr/lib/libargparse.lua")
 if not argparse_source then fail(argparse_error) end
-local argparse_chunk, argparse_load_error = load(argparse_source, "@/usr/lib/argparse.lua", "t", _ENV)
+local argparse_chunk, argparse_load_error = load(argparse_source, "@/usr/lib/libargparse.lua", "t", _ENV)
 if not argparse_chunk then fail("cannot load argument parser: " .. tostring(argparse_load_error)) end
 local argparse = argparse_chunk()
 local parser = argparse("sudo"):add_help(false)

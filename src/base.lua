@@ -21,7 +21,9 @@ getRealTime = function()
     return bootRealTime + computer.uptime()
 end
 
----@type onix_config
+loadfile = loadfile and loadfile or function(a,b)local c,d=computer.getBootAddress(),component.invoke;local e,f=d(c,"open",a)if not e then return nil,f end;local g=""while true do local h,f=d(c,"read",e,math.huge)if not h then if f then d(c,"close",e)return nil,f else break end end;g=g..h end;d(c,"close",e)local i,j=load(g,"="..a,"bt",b or _ENV)if not i then return nil,j end;return i end
+
+---@type nexus_config
 config = {}
 do
     local f, e = loadfile("/boot/config.lua")
@@ -30,6 +32,9 @@ do
     end
 end
 
+---@param env? table
+loadfile = function(file, env) end
+
 version = {
     id = "Nexus 0.1.0-dev-oc_ocelot";
     name = "Nexus";
@@ -37,14 +42,11 @@ version = {
     dist = "Nexus";
 };
 
-_OSVERSION = config.version.id
-_OSVERSIONSTRING = config.version.ver
-_OSDIST = config.version.dist
-_OSNAME = config.version.name
+_OSVERSION = config.kernel_version.id
+_OSVERSIONSTRING = config.kernel_version.ver
+_OSDIST = config.kernel_version.dist
+_OSNAME = config.kernel_version.name
 _MACHINE = "OpenComputers (" .. computer.getArchitecture() .. ")"
-
----@param env? table
-loadfile = function(file, env) end
 
 fnv1a_hash = function(str)
     local hash = 2166136261

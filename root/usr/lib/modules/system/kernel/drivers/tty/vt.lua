@@ -3,13 +3,17 @@ local devfs = require("devfs")
 ---@type module
 local module = require("module")
 ---@type vfs
-local fs = require("filesystem")
+local fs = require("filesystem") --[[@as vfs]]
 ---@type oc_component_lib
 local component = require("component")
 ---@type system
 local system = require("system")
+local computer = require("computer")
+local event = require("event")
+local process = require("process")
 
 local vts = {}
+local CURSOR_HALF_PERIOD = 0.5
 
 local ansi_colors = {
     ["30"] = 0x000000,
@@ -321,8 +325,55 @@ function vt_driver:scroll(n)
     self.dirty = true
 end
 
+function vt_driver:setInputCursor(pid)
+    local owner = pid and process.get(pid)
+    self.cursorPid = owner and pid or nil
+    self.cursorInstance = owner and owner.instance or nil
+    if owner then self.cursorSince = computer.uptime() end
+end
+
+function vt_driver:updateCursor()
+    local gpu = self.gpu
+    local previous = self.cursorOverlay
+    if not gpu or (not self.cursorPid and not previous) then return end
+
+    local x, y
+    if self.cursorPid then
+        local owner = process.get(self.cursorPid)
+        if not owner or owner.instance ~= self.cursorInstance then
+            self.cursorPid = nil
+        elseif self.scscroll == 0 and event.getForeground() == self.cursorPid
+            and math.floor((computer.uptime() - self.cursorSince) / CURSOR_HALF_PERIOD) % 2 == 0 then
+            x = self.cx
+            y = #self.line_positions + self.cy - (self.screenStart or 1) + 1
+            if x < 1 or x > self.width or y < 1 or y > self.height then x, y = nil, nil end
+        end
+    end
+
+    if previous and previous.x == x and previous.y == y then return end
+    if previous then
+        -- The off-screen frame still has the original text and colors.
+        gpu.bitblt(0, previous.x, previous.y, 1, 1, self.buf_n, previous.x, previous.y)
+        self.cursorOverlay = nil
+    end
+    if not x then return end
+
+    local activeBuffer = gpu.getActiveBuffer()
+    if activeBuffer ~= 0 then gpu.setActiveBuffer(0) end
+    local background, palette = gpu.getBackground()
+    gpu.setBackground(self.fg)
+    gpu.fill(x, y, 1, 1, " ")
+    gpu.setBackground(background, palette)
+    if activeBuffer ~= 0 then gpu.setActiveBuffer(activeBuffer) end
+    self.cursorOverlay = { x = x, y = y }
+end
+
 function vt_driver:update()
-    if not self.dirty or self.updating then return end
+    if self.updating then return end
+    if not self.dirty then
+        self:updateCursor()
+        return
+    end
     self.updating = true
 
     local gpu = self.gpu
@@ -354,6 +405,7 @@ function vt_driver:update()
     local current_buf_size = #self.buf
     local total_lines = offset + current_buf_size
     local start_line = math.max(1, total_lines - self.height + 1 - self.scscroll)
+    self.screenStart = start_line
 
     local old_buf_n = nil
     if gpu.getActiveBuffer and gpu.setActiveBuffer then
@@ -410,7 +462,7 @@ function vt_driver:update()
 
     if f then f:close() end
 
-    if system.config and system.config.console_vt_debug then
+    if system.config.console_vt_debug then
         local vtbuf_size = 0
         vtbuf_size = (fs.size and fs.size("/tmp/vtbuf")) or 0
         local debug_str = string.format(
@@ -424,6 +476,12 @@ function vt_driver:update()
         gpu.set(1, 1, debug_str)
     end
 
+    if system.config.debug then
+        gpu.setForeground(0xFFFFFF)
+        gpu.setBackground(0xFF0000)
+        gpu.set(self.width - 4, self.height, "DEBUG")
+    end
+
     gpu.bitblt(0, 1, 1, self.width, self.height + 1, self.buf_n, 1, 1)
     if gpu.setActiveBuffer then
         gpu.setActiveBuffer(old_buf_n)
@@ -431,6 +489,8 @@ function vt_driver:update()
 
     self.dirty = false
     self.updating = false
+    self.cursorOverlay = nil
+    self:updateCursor()
 end
 
 function vt_driver:backspace(n)
@@ -510,8 +570,17 @@ local vt = {}
 ---@param id integer
 function vt.new(id)
     local dev = setmetatable({}, {__index = vt_driver})
-    devfs.create("ttyv" .. tostring(id), dev)
     dev:init()
+    local callbacks = {
+        read = function(_handle, ...)
+            return dev:read(...)
+        end,
+        write = function(_handle, value)
+            dev:write(value)
+            return true
+        end,
+    }
+    devfs.create("ttyv" .. tostring(id), callbacks)
     table.insert(vts, {dev = dev, id = id})
     return dev
 end

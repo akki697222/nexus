@@ -16,13 +16,18 @@ local fbcon = {
 }
 
 function fbcon.reset()
+    ---@type oc_component_gpu
     local gpu = component.proxy(component.list("gpu")())
     if not gpu then
         error("No GPU found")
     end
     fbcon.gpu = gpu
     gpu.freeAllBuffers()
-    fbcon.width, fbcon.height = gpu.maxResolution()
+    if config.console_framebuffer_minimumres then
+        fbcon.width, fbcon.height = 50, 16
+    else
+        fbcon.width, fbcon.height = gpu.maxResolution()
+    end
     gpu.setResolution(fbcon.width, fbcon.height)
     gpu.setViewport(fbcon.width, fbcon.height)
     gpu.setForeground(0xFFFFFF)
@@ -127,7 +132,7 @@ printk = function(...)
 end
 
 panic = function(err, reason)
-    if config.bsod then
+    if config.kernel_panic_bsod then
         local gpu = component.proxy(component.list("gpu")()) --[[@as oc_component_gpu]]
         local w, h = gpu.getResolution()
         gpu.setForeground(0xFFFFFF)

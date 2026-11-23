@@ -1,0 +1,4 @@
+#!/sbin/openoc-run
+description="Print the system version"
+command=/usr/ubin/uname.lua
+type=oneshot

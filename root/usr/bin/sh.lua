@@ -2,6 +2,16 @@
 local colors  = require("colors")
 local fs      = require("filesystem") --[[@as vfs]]
 local process = require("process")
+local scriptName = "sh"
+local scriptArgs = {}
+
+local function shell_value(name)
+    if name == "#" then return tostring(#scriptArgs) end
+    if name == "0" then return scriptName end
+    if name:match("^%d+$") then return scriptArgs[tonumber(name)] or "" end
+    if name == "?" then return os.getenv("?") or "0" end
+    return os.getenv(name) or ""
+end
 
 local function expand_env(s, lookup)
     lookup = lookup or os.getenv
@@ -34,9 +44,13 @@ end
 ---@return string[][] segments, boolean malformed
 local function tokenize(line)
     local segments, words = {}, {}
-    local word, started = {}, false
+    local word, glob_bytes, started = {}, {}, false
     local quote, escaped, word_unquoted_start = nil, false, false
     local i, len = 1, #line
+    local function append_word(text, glob_eligible)
+        word[#word + 1] = text
+        for _ = 1, #text do glob_bytes[#glob_bytes + 1] = glob_eligible end
+    end
     local function finish_word()
         if not started then return end
         local value = table.concat(word)
@@ -45,10 +59,17 @@ local function tokenize(line)
             if home then
                 if value == "~" then value = home
                 else value = (home == "/" and "" or home) .. value:sub(2) end
+                local suffix_mask = {}
+                for j = 2, #glob_bytes do suffix_mask[#suffix_mask + 1] = glob_bytes[j] end
+                glob_bytes = {}
+                -- The HOME prefix was inserted by tilde expansion and is literal.
+                local suffix_length = #suffix_mask
+                for _ = 1, #value - suffix_length do glob_bytes[#glob_bytes + 1] = false end
+                for _, eligible in ipairs(suffix_mask) do glob_bytes[#glob_bytes + 1] = eligible end
             end
         end
-        words[#words + 1] = value
-        word, started, word_unquoted_start = {}, false, false
+        words[#words + 1] = { value = value, glob = glob_bytes }
+        word, glob_bytes, started, word_unquoted_start = {}, {}, false, false
     end
     local function finish_segment()
         finish_word()
@@ -57,29 +78,30 @@ local function tokenize(line)
     end
     local function expansion_at(pos)
         local rest = line:sub(pos)
-        local name, after = rest:match("^%$%{([%w_?]+)%}()")
-        if name then return os.getenv(name) or "", pos + after - 1 end
-        name, after = rest:match("^%$([%w_?]+)()")
-        if name then return os.getenv(name) or "", pos + after - 1 end
+        local name, after = rest:match("^%$%{([%w_?#]+)%}()")
+        if name then return shell_value(name), pos + after - 1 end
+        name, after = rest:match("^%$([%d?#])()")
+        if not name then name, after = rest:match("^%$([%a_][%w_]*)()") end
+        if name then return shell_value(name), pos + after - 1 end
         return "$", pos + 1
     end
     while i <= len do
         local c = line:sub(i, i)
         if escaped then
-            word[#word + 1] = c
+            append_word(c, false)
             started, escaped = true, false
         elseif quote == "'" then
-            if c == "'" then quote = nil else word[#word + 1] = c end
+            if c == "'" then quote = nil else append_word(c, false) end
         elseif quote == '"' then
             if c == '"' then quote = nil
             elseif c == "\\" and i < len then
                 i = i + 1
-                word[#word + 1] = line:sub(i, i)
+                append_word(line:sub(i, i), false)
             elseif c == "$" then
                 local value, after = expansion_at(i)
-                word[#word + 1] = value
+                append_word(value, false)
                 i = after - 1
-            else word[#word + 1] = c end
+            else append_word(c, false) end
         elseif c == "\\" then
             if not started then word_unquoted_start = false end
             started, escaped = true, true
@@ -90,25 +112,318 @@ local function tokenize(line)
             local value, after = expansion_at(i)
             if not started then word_unquoted_start = false end
             started = true
-            word[#word + 1] = value
+            append_word(value, true)
             i = after - 1
         elseif c == "|" then finish_segment()
         elseif c:match("%s") then finish_word()
         elseif c == "#" and not started then break
+        elseif c == ">" or c == "<" then
+            finish_word()
+            local op = c
+            if c == ">" and line:sub(i + 1, i + 1) == ">" then
+                op = ">>"
+                i = i + 1
+            end
+            words[#words + 1] = { redirect = op }
         else
             if not started then
                 local next_c = line:sub(i + 1, i + 1)
                 word_unquoted_start = c == "~" and (next_c == "" or next_c == "/" or next_c == "|" or next_c:match("%s") ~= nil)
             end
             started = true
-            word[#word + 1] = c
+            append_word(c, true)
         end
         i = i + 1
     end
-    if escaped then word[#word + 1] = "\\" end
+    if escaped then append_word("\\", false) end
     if quote then return {}, true end
     finish_segment()
     return segments, false
+end
+
+local function char_width(value, index)
+    local byte = value:byte(index)
+    if not byte then return 0 end
+    if byte < 0x80 then return 1 end
+    if byte >= 0xC2 and byte <= 0xDF then return 2 end
+    if byte >= 0xE0 and byte <= 0xEF then return 3 end
+    if byte >= 0xF0 and byte <= 0xF4 then return 4 end
+    return 1
+end
+
+local function next_char(value, index)
+    local width = char_width(value, index)
+    if width == 0 then return nil, index end
+    return value:sub(index, index + width - 1), index + width
+end
+
+local function class_end(value, mask, start)
+    local i = start + 1
+    if (value:sub(i, i) == "!" or value:sub(i, i) == "^") and mask[i] then i = i + 1 end
+    if value:sub(i, i) == "]" then i = i + 1 end
+    while i <= #value do
+        if value:sub(i, i) == "]" and mask[i] then return i end
+        i = i + char_width(value, i)
+    end
+end
+
+local function compile_glob(value, mask)
+    local tokens, has_wildcard = {}, false
+    local i = 1
+    while i <= #value do
+        local c = value:sub(i, i)
+        if mask[i] and c == "*" then
+            if tokens[#tokens] == nil or tokens[#tokens].kind ~= "star" then
+                tokens[#tokens + 1] = { kind = "star" }
+            end
+            has_wildcard = true
+            i = i + 1
+        elseif mask[i] and c == "?" then
+            tokens[#tokens + 1] = { kind = "any" }
+            has_wildcard = true
+            i = i + 1
+        elseif mask[i] and c == "[" then
+            local ending = class_end(value, mask, i)
+            if ending then
+                local class_value, class_mask = value:sub(i + 1, ending - 1), {}
+                for j = i + 1, ending - 1 do class_mask[#class_mask + 1] = mask[j] end
+                tokens[#tokens + 1] = { kind = "class", value = class_value, mask = class_mask }
+                has_wildcard = true
+                i = ending + 1
+            else
+                local literal, after = next_char(value, i)
+                tokens[#tokens + 1] = { kind = "literal", value = literal }
+                i = after
+            end
+        else
+            local literal, after = next_char(value, i)
+            tokens[#tokens + 1] = { kind = "literal", value = literal }
+            i = after
+        end
+    end
+    return tokens, has_wildcard
+end
+
+local function class_matches(token, candidate)
+    local class, mask = token.value, token.mask
+    local first_char = class:sub(1, 1)
+    local negate = (first_char == "!" or first_char == "^") and mask[1]
+    local i = negate and 2 or 1
+    local matched = false
+    while i <= #class do
+        local first, after_first = next_char(class, i)
+        if after_first <= #class - 1 and class:sub(after_first, after_first) == "-" and mask[after_first] then
+            local last, after_last = next_char(class, after_first + 1)
+            if first and last and first <= candidate and candidate <= last then
+                matched = true
+            end
+            i = after_last
+        else
+            if candidate == first then matched = true end
+            i = after_first
+        end
+    end
+    return negate and not matched or (not negate and matched)
+end
+
+local function glob_matches(name, tokens)
+    local memo = {}
+    local function match(token_index, name_index)
+        local key = token_index .. ":" .. name_index
+        if memo[key] ~= nil then return memo[key] end
+        local token = tokens[token_index]
+        if not token then
+            local result = name_index > #name
+            memo[key] = result
+            return result
+        end
+        local result = false
+        if token.kind == "star" then
+            result = match(token_index + 1, name_index)
+            if not result and name_index <= #name then
+                local _, after = next_char(name, name_index)
+                result = match(token_index, after)
+            end
+        elseif name_index <= #name then
+            local candidate, after = next_char(name, name_index)
+            if token.kind == "any" then
+                result = match(token_index + 1, after)
+            elseif token.kind == "class" then
+                result = class_matches(token, candidate) and match(token_index + 1, after)
+            elseif candidate == token.value then
+                result = match(token_index + 1, after)
+            end
+        end
+        memo[key] = result
+        return result
+    end
+    return match(1, 1)
+end
+
+local function append_path_component(prefix, component)
+    if prefix == "" then return component end
+    if prefix == "/" then return "/" .. component end
+    return prefix .. "/" .. component
+end
+
+local function expand_word(word)
+    local value, mask = word.value, word.glob
+    local has_pattern_byte = false
+    for i = 1, #value do
+        if mask[i] and (value:sub(i, i) == "*" or value:sub(i, i) == "?" or value:sub(i, i) == "[") then
+            has_pattern_byte = true
+            break
+        end
+    end
+    if not has_pattern_byte then return { value } end
+    local components, i = {}, 1
+    while i <= #value do
+        while value:sub(i, i) == "/" do i = i + 1 end
+        if i <= #value then
+            local start = i
+            while i <= #value and value:sub(i, i) ~= "/" do i = i + 1 end
+            local component, component_mask = value:sub(start, i - 1), {}
+            for j = start, i - 1 do component_mask[#component_mask + 1] = mask[j] end
+            local pattern, has_wildcard = compile_glob(component, component_mask)
+            components[#components + 1] = { value = component, pattern = pattern, wildcard = has_wildcard }
+        end
+    end
+    if #components == 0 then return { value } end
+    local had_wildcard = false
+    for _, component in ipairs(components) do
+        if component.wildcard then had_wildcard = true; break end
+    end
+    if not had_wildcard then return { value } end
+
+    local prefixes = { value:sub(1, 1) == "/" and "/" or "" }
+    local wildcard_seen = false
+    for _, component in ipairs(components) do
+        local next_prefixes = {}
+        if component.wildcard then
+            wildcard_seen = true
+            for _, prefix in ipairs(prefixes) do
+                local resolve_ok, directory = pcall(fs.resolve, prefix == "" and "." or prefix)
+                if not resolve_ok then directory = nil end
+                local real = directory
+                if directory then
+                    local real_ok, real_path = pcall(fs.realPath, directory)
+                    if not real_ok then directory = nil else real = real_path or directory end
+                end
+                local function can_list(path)
+                    if not path then return false end
+                    local ok, directory_attr = pcall(fs.isDirectory, path)
+                    if not ok or not directory_attr then return false end
+                    local can_ok, can_read = pcall(fs.can, path, "r")
+                    if not can_ok or not can_read then return false end
+                    local exec_ok, can_exec = pcall(fs.can, path, "x")
+                    return exec_ok and can_exec
+                end
+                if can_list(directory) and (real == directory or can_list(real)) then
+                    local listed, entries = pcall(fs.list, directory)
+                    if listed and entries then
+                        pcall(function()
+                            for name in entries do
+                                if (name:sub(1, 1) ~= "." or component.value:sub(1, 1) == ".")
+                                    and glob_matches(name, component.pattern) then
+                                    next_prefixes[#next_prefixes + 1] = append_path_component(prefix, name)
+                                end
+                            end
+                        end)
+                    end
+                end
+            end
+        else
+            for _, prefix in ipairs(prefixes) do
+                local candidate = append_path_component(prefix, component.value)
+                local exists = true
+                if wildcard_seen then
+                    local resolve_ok, resolved = pcall(fs.resolve, candidate)
+                    local exists_ok, result = false, false
+                    if resolve_ok then exists_ok, result = pcall(fs.exists, resolved) end
+                    exists = exists_ok and result
+                end
+                if exists then
+                    next_prefixes[#next_prefixes + 1] = candidate
+                end
+            end
+        end
+        prefixes = next_prefixes
+        if #prefixes == 0 then break end
+    end
+    if #prefixes == 0 then return { value } end
+    if value:sub(-1) == "/" then
+        local directories = {}
+        for _, candidate in ipairs(prefixes) do
+            local resolve_ok, resolved = pcall(fs.resolve, candidate)
+            local dir_ok, is_directory = false, false
+            if resolve_ok then dir_ok, is_directory = pcall(fs.isDirectory, resolved) end
+            if dir_ok and is_directory then
+                directories[#directories + 1] = candidate:sub(-1) == "/" and candidate or (candidate .. "/")
+            end
+        end
+        prefixes = directories
+        if #prefixes == 0 then return { value } end
+    end
+    table.sort(prefixes)
+    return prefixes
+end
+
+local function parse_redirections(segments)
+    local parsed = {}
+    for _, segment in ipairs(segments) do
+        local command, redirects = {}, {}
+        local i = 1
+        while i <= #segment do
+            local token = segment[i]
+            if type(token) == "table" and token.redirect then
+                local target = segment[i + 1]
+                if type(target) ~= "table" or not target.value or target.value == "" then
+                    return nil, "missing redirection target"
+                end
+                redirects[#redirects + 1] = { op = token.redirect, path = target.value, glob = target.glob }
+                i = i + 2
+            else
+                command[#command + 1] = token
+                i = i + 1
+            end
+        end
+        parsed[#parsed + 1] = { args = command, redirects = redirects }
+    end
+    return parsed
+end
+
+local function is_standalone_assignment(stage)
+    if #stage.args == 0 or #stage.redirects > 0 then return false end
+    for _, word in ipairs(stage.args) do
+        if not word.value:match("^[%a_][%w_]*=") then return false end
+    end
+    return true
+end
+
+local function expand_pipeline(parsed, location)
+    for _, stage in ipairs(parsed) do
+        local assignment_only = is_standalone_assignment(stage)
+        local expanded = {}
+        for _, word in ipairs(stage.args) do
+            if assignment_only then
+                expanded[#expanded + 1] = word.value
+            else
+                local matches = expand_word(word)
+                for _, match in ipairs(matches) do expanded[#expanded + 1] = match end
+            end
+        end
+        stage.args = expanded
+
+        for _, redirect in ipairs(stage.redirects) do
+            local matches = expand_word({ value = redirect.path, glob = redirect.glob })
+            if #matches > 1 then
+                io.stderr:write(location .. ": " .. redirect.path .. ": ambiguous redirect\n")
+                return false
+            end
+            redirect.path = matches[1]
+        end
+    end
+    return true
 end
 
 ---@param cmd string
@@ -170,7 +485,7 @@ builtins["echo"] = function(args)
 end
 
 builtins["exit"] = function(args)
-    local code = tonumber(args[2]) or 0
+    local code = tonumber(args[2] or os.getenv("?")) or 0
     os.exit(code)
     return 0
 end
@@ -222,6 +537,8 @@ builtins["help"] = function(args)
     for _, row in ipairs(list) do
         io.write(string.format("  %-22s %s\n", colors.green .. row[1] .. colors.reset, row[2]))
     end
+    io.write("  Redirection: command < input, command > output, command >> output\n")
+    io.write("  Example: cat < input.txt | cat > output.txt\n")
     return 0
 end
 
@@ -248,14 +565,132 @@ local function exec_external(path, args)
     return type(status) == "number" and status or 0
 end
 
+local function close_redirects(handles)
+    for i = #handles, 1, -1 do
+        if type(handles[i]) == "number" then
+            pcall(fs.close, handles[i])
+        else
+            pcall(function() handles[i]:close() end)
+        end
+    end
+end
+
+local function open_redirects(redirects)
+    local mapping, handles = {}, {}
+    for _, redirect in ipairs(redirects) do
+        local target_fd = redirect.op == "<" and 0 or 1
+        local mode = redirect.op == "<" and "r" or (redirect.op == ">>" and "a" or "w")
+        local open_ok, file, err = pcall(fs.open, redirect.path, mode)
+        if not open_ok then
+            close_redirects(handles)
+            return nil, nil, redirect.path .. ": " .. tostring(file)
+        end
+        if not file then
+            close_redirects(handles)
+            return nil, nil, redirect.path .. ": " .. tostring(err or "open failed")
+        end
+        handles[#handles + 1] = file
+        local fd = file:fd()
+        if type(fd) ~= "number" or fd < 0 then
+            close_redirects(handles)
+            return nil, nil, redirect.path .. ": invalid file descriptor"
+        end
+        if fd < 3 then
+            local safe_fd, dup_err = fs.dup(fd, 3)
+            pcall(function() file:close() end)
+            handles[#handles] = nil
+            if type(safe_fd) ~= "number" or safe_fd < 0 then
+                close_redirects(handles)
+                return nil, nil, redirect.path .. ": " .. tostring(dup_err or "dup failed")
+            end
+            fd = safe_fd
+            handles[#handles + 1] = fd
+        end
+        mapping[target_fd] = fd
+    end
+    return mapping, handles
+end
+
+local function run_builtin_redirected(args, redirects)
+    local mapping, handles, err = open_redirects(redirects)
+    if not mapping then
+        io.stderr:write("sh: " .. tostring(err) .. "\n")
+        return 1
+    end
+    local saved, absent = {}, {}
+    local targets = {}
+    for fd in pairs(mapping) do targets[#targets + 1] = fd end
+    table.sort(targets)
+    for _, fd in ipairs(targets) do
+        local original, dup_err = fs.dup(fd, 3)
+        if type(original) == "number" and original >= 0 then
+            saved[fd] = original
+        else
+            -- A missing original descriptor is represented by dup failing with EBADF.
+            absent[fd] = true
+            if dup_err and not tostring(dup_err):lower():find("bad file descriptor", 1, true) then
+                close_redirects(handles)
+                for _, saved_fd in pairs(saved) do fs.close(saved_fd) end
+                io.stderr:write("sh: cannot save fd " .. fd .. ": " .. tostring(dup_err) .. "\n")
+                return 1
+            end
+        end
+    end
+    local applied, apply_err = {}, nil
+    for _, fd in ipairs(targets) do
+        local ok, result, dup2_err = pcall(fs.dup2, mapping[fd], fd)
+        if not ok or result == nil or result == false or (type(result) == "number" and result < 0) then
+            apply_err = ok and (dup2_err or "dup2 failed") or result
+            break
+        end
+        applied[#applied + 1] = fd
+    end
+    local status
+    if apply_err then
+        io.stderr:write("sh: redirection: " .. tostring(apply_err) .. "\n")
+        status = 1
+    else
+        local ok, result = pcall(builtins[args[1]], args)
+        if not ok then
+            io.stderr:write(args[1] .. ": " .. tostring(result) .. "\n")
+            status = 1
+        else status = result or 0 end
+    end
+    for i = #applied, 1, -1 do
+        local fd = applied[i]
+        if absent[fd] then
+            pcall(fs.close, fd)
+        else
+            pcall(fs.dup2, saved[fd], fd)
+        end
+    end
+    for _, fd in pairs(saved) do pcall(fs.close, fd) end
+    close_redirects(handles)
+    return status
+end
+
 ---@param tokens string[]
 ---@return integer exitcode
-local function run_command(tokens)
+local function run_command(tokens, redirects)
     if #tokens == 0 then return 0 end
+
+    if tokens[1]:match("^[%a_][%w_]*=") and (not redirects or #redirects == 0) then
+        local assignments = {}
+        for i, token in ipairs(tokens) do
+            local name, value = token:match("^([%a_][%w_]*)=(.*)$")
+            if not name then break end
+            assignments[i] = { name, value }
+        end
+        if #assignments == #tokens then
+            for _, assignment in ipairs(assignments) do os.setenv(assignment[1], assignment[2]) end
+            return 0
+        end
+    end
 
     local cmd = tokens[1]
 
     if builtins[cmd] then
+        if redirects and #redirects > 0 then return run_builtin_redirected(tokens, redirects) end
         local ok, result = pcall(builtins[cmd], tokens)
         if not ok then
             io.stderr:write(cmd .. ": " .. tostring(result) .. "\n")
@@ -270,23 +705,67 @@ local function run_command(tokens)
         return 127
     end
 
+    if redirects and #redirects > 0 then
+        local mapping, handles, err = open_redirects(redirects)
+        if not mapping then
+            io.stderr:write("sh: " .. tostring(err) .. "\n")
+            return 1
+        end
+        local child_args = {}
+        for i = 2, #tokens do child_args[#child_args + 1] = tokens[i] end
+        local pid, spawn_err, instance = process.spawn(path, child_args, mapping)
+        close_redirects(handles)
+        if not pid or pid == -1 then
+            io.stderr:write(cmd .. ": " .. tostring(spawn_err or "spawn failed") .. "\n")
+            return 1
+        end
+        if instance == nil then
+            local proc = process.get(pid)
+            instance = proc and proc.instance
+        end
+        local wait_err, status = process.wait(pid, instance)
+        if wait_err then
+            io.stderr:write(cmd .. ": process error: " .. tostring(wait_err) .. "\n")
+            return 1
+        end
+        return type(status) == "number" and status or 0
+    end
     return exec_external(path, tokens)
 end
 
-local function run_pipeline(segments)
-    if #segments < 2 then return run_command(segments[1] or {}) end
-    for _, args in ipairs(segments) do
+local function syntax_error(location, message)
+    io.stderr:write(location .. ": syntax error: " .. message .. "\n")
+    return 2, true
+end
+
+local function run_pipeline(segments, location)
+    local parsed, parse_err = parse_redirections(segments)
+    if not parsed then
+        return syntax_error(location, parse_err)
+    end
+    for _, stage in ipairs(parsed) do
+        if #stage.args == 0 and #stage.redirects > 0 then
+            return syntax_error(location, "redirection without a command")
+        end
+    end
+    if not expand_pipeline(parsed, location) then return 1 end
+    if #parsed < 2 then
+        local command = parsed[1] or { args = {}, redirects = {} }
+        return run_command(command.args, command.redirects)
+    end
+    for _, stage in ipairs(parsed) do
+        local args = stage.args
         if #args == 0 then
-            io.stderr:write("sh: syntax error: missing command in pipeline\n")
-            return 2
+            return syntax_error(location, "missing command in pipeline")
         end
     end
     local stages = {}
-    for i, args in ipairs(segments) do
+    for i, stage in ipairs(parsed) do
+        local args = stage.args
         if builtins[args[1]] then
             local child_args = { "--builtin", args[1] }
             for j = 2, #args do child_args[#child_args + 1] = args[j] end
-            stages[i] = { path = "/usr/bin/sh.lua", args = child_args, label = args[1] }
+            stages[i] = { path = "/usr/bin/sh.lua", args = child_args, label = args[1], redirects = stage.redirects }
         else
             local path = find_in_path(args[1])
             if not path then
@@ -295,7 +774,7 @@ local function run_pipeline(segments)
             end
             local child_args = {}
             for j = 2, #args do child_args[#child_args + 1] = args[j] end
-            stages[i] = { path = path, args = child_args, label = args[1] }
+            stages[i] = { path = path, args = child_args, label = args[1], redirects = stage.redirects }
         end
     end
     local pipes = {}
@@ -315,7 +794,14 @@ local function run_pipeline(segments)
         local stdio = {}
         if i > 1 then stdio[0] = pipes[i - 1][1] end
         if i < #stages then stdio[1] = pipes[i][2] end
+        local redirs, handles, redirect_err = open_redirects(stage.redirects)
+        if not redirs then
+            failure = { label = stage.label, error = redirect_err }
+            break
+        end
+        for fd, target_fd in pairs(redirs) do stdio[fd] = target_fd end
         local pid, err, instance = process.spawn(stage.path, stage.args, stdio)
+        close_redirects(handles)
         if not pid or pid == -1 then
             failure = { label = stage.label, error = err }
             break
@@ -349,13 +835,42 @@ local function run_pipeline(segments)
     return status
 end
 
-local function run_line(line)
+local function run_line(line, location)
+    location = location or "sh"
     local segments, malformed = tokenize(line)
     if malformed then
-        io.stderr:write("sh: syntax error: unmatched quote\n")
-        return 2
+        return syntax_error(location, "unmatched quote")
     end
-    return run_pipeline(segments)
+    return run_pipeline(segments, location)
+end
+
+local function set_script_arguments(name, argv, first)
+    scriptName = name
+    scriptArgs = {}
+    for i = first, #argv do scriptArgs[#scriptArgs + 1] = argv[i] end
+end
+
+local function run_script(file, name)
+    local status, lineNumber = 0, 0
+    os.setenv("?", "0")
+    while true do
+        local line, err = file:read("*L")
+        if line == nil then
+            if err then
+                io.stderr:write("sh: " .. name .. ": " .. tostring(err) .. "\n")
+                return 1
+            end
+            return status
+        end
+        lineNumber = lineNumber + 1
+        line = line:gsub("\r?\n$", "")
+        if line:find("%S") and not line:match("^%s*#") then
+            local malformed
+            status, malformed = run_line(line, name .. ":" .. lineNumber)
+            os.setenv("?", tostring(status))
+            if malformed then return status end
+        end
+    end
 end
 
 local function get_prompt()
@@ -393,8 +908,37 @@ if shell_args[1] == "--builtin" then
     end
     os.exit(status)
 elseif shell_args[1] == "-c" then
-    local line = shell_args[2] or ""
-    os.exit(run_line(line))
+    if shell_args[2] == nil then
+        io.stderr:write("sh: -c requires a command\n")
+        os.exit(2)
+        return
+    end
+    set_script_arguments(shell_args[3] or "sh", shell_args, 4)
+    os.exit(run_line(shell_args[2]))
+    return
+elseif shell_args[1] == "-s" then
+    set_script_arguments("sh", shell_args, 2)
+    os.exit(run_script(io.stdin, "stdin"))
+    return
+elseif shell_args[1] and shell_args[1] ~= "-l" then
+    local first = shell_args[1] == "--" and 2 or 1
+    local path = shell_args[first]
+    if not path or (first == 1 and path:sub(1, 1) == "-") then
+        io.stderr:write("Usage: sh [-l] | sh -c command | sh -s [args...] | sh [--] script [args...]\n")
+        os.exit(2)
+        return
+    end
+    local opened, file, err = pcall(fs.open, path, "r")
+    if not opened or not file then
+        io.stderr:write("sh: " .. path .. ": " .. tostring(opened and err or file) .. "\n")
+        os.exit(127)
+        return
+    end
+    set_script_arguments(path, shell_args, first + 1)
+    local status = run_script(file, path)
+    file:close()
+    os.exit(status)
+    return
 end
 
 local last_exit = 0

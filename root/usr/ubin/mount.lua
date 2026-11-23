@@ -1,90 +1,59 @@
 local fs = require("filesystem")
-local shell = require("shell")
+local device = require("device")
+local argparse = require("argparse")
 
-local function usage()
-    io.stderr:write([==[
-Usage: mount [OPTIONS] [device] [path]")
-  If no args are given, all current mount points are printed.
-  <Options> Note that multiple options can be used together
-  -r, --ro    Mount the filesystem read only
-      --bind  Create a mount bind point, folder to folder
-  <Args>
-  device      Specify filesystem device by one of:
-              a. label
-              b. address (can be abbreviated)
-              c. folder path (requires --bind)
-  path        Target folder path to mount to
-
-See `man mount` for more details
-  ]==])
+local parser = argparse("mount", "Mount a filesystem or list mount points")
+parser:argument("operands", "SOURCE and TARGET"):args("*")
+local ok, args = parser:pparse({...})
+if not ok then
+    io.stderr:write("mount: " .. tostring(args) .. "\n")
     os.exit(1)
 end
 
--- smart parse, follow arg after -o
-local args, opts = shell.parse(...)
-opts.readonly = opts.r or opts.readonly
-
-if opts.h or opts.help then
-    usage()
-end
-
-local function print_mounts()
-    -- for each mount
-    local mounts = {}
-
-    for info, path in fs.mounts() do
-        local device = {}
-
-        device.dev_path = info.address or info.label or "none"
-        device.mount_path = path
-        device.rw_ro = info.readOnly and "ro" or "rw"
-        device.fs_label = info.label or device.dev_path
-
-        mounts[device.dev_path] = mounts[device.dev_path] or {}
-        local dev_mounts = mounts[device.dev_path]
-        table.insert(dev_mounts, device)
-    end
-
-    local smounts = {}
-    for key, value in pairs(mounts) do
-        smounts[#smounts + 1] = { key, value }
-    end
-    table.sort(smounts, function(a, b) return a[1] < b[1] end)
-
-    for _, dev in ipairs(smounts) do
-        local dev_path, dev_mounts = table.unpack(dev)
-        for _, device in ipairs(dev_mounts) do
-            local rw_ro = "(" .. device.rw_ro .. ")"
-            local fs_label = "\"" .. device.fs_label .. "\""
-
-            io.write(string.format("%-8s on %-10s %s %s\n",
-                dev_path:sub(1, 8),
-                device.mount_path,
-                rw_ro,
-                fs_label))
+local function resolveDevice(source)
+    local node = source:match("^/dev/(hd%d+)$") or source:match("^/dev/(fd%d+)$")
+    if node then
+        for address, manifest in pairs(device.list()) do
+            if manifest.node == node then return address end
         end
     end
+    return source
 end
 
-local function do_mount()
-    -- device is a filesystem label or address
-    local result, mount_failure = fs.mount(args[1], shell.resolve(args[2]))
-    if not result then
-        io.stderr:write(mount_failure, "\n")
-        os.exit(2) -- error code
+local function listMounts()
+    local rows = {}
+    for info, path in fs.mounts() do
+        rows[#rows + 1] = {
+            path = path,
+            source = info.address or info.label or "?",
+            label = info.label,
+            mode = info.readOnly == true and "ro" or info.readOnly == false and "rw" or "?",
+        }
+    end
+    table.sort(rows, function(a, b)
+        if a.path == b.path then return a.source < b.source end
+        return a.path < b.path
+    end)
+    for _, row in ipairs(rows) do
+        local label = row.label and (" (" .. row.label .. ")") or ""
+        io.write(string.format("%s%s on %s (%s)\n", row.source, label, row.path, row.mode))
     end
 end
 
-if #args == 0 then
-    if next(opts) then
-        io.stderr:write("Missing argument\n")
-        usage()
-    else
-        print_mounts()
+if #args.operands == 0 then
+    listMounts()
+elseif #args.operands == 2 then
+    if args.operands[1] == "" or args.operands[2] == "" then
+        io.stderr:write("mount: source and target must not be empty\n")
+        os.exit(1)
     end
-elseif #args == 2 then
-    do_mount()
+    local source = resolveDevice(args.operands[1])
+    local mounted, err = fs.mount(source, args.operands[2])
+    if not mounted then
+        io.stderr:write("mount: " .. tostring(err or "mount failed") .. "\n")
+        os.exit(2)
+    end
 else
-    io.stderr:write("wrong number of arguments: ", #args, "\n")
-    usage()
+    io.stderr:write("mount: expected no operands or SOURCE TARGET\n")
+    os.exit(1)
 end

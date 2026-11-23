@@ -134,7 +134,7 @@ signals = {
 ---@param func function
 ---@param proc process_entry?
 ---@return thread
-local function wrap_with_traceback(func, proc)
+function wrap_with_traceback(func, proc)
     return coroutine.create(function(...)
         local ok, result = xpcall(func, debug.traceback, ...)
         if not ok then

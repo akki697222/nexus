@@ -16,7 +16,7 @@ process = {
     blockIO = function(channel) coroutine.yield(channel) end,
     wakeIO = function() end,
 }
-config = { read_bytes = 64 }
+config = { filesystem_read_bytes = 64 }
 fnv1a_hash = function(value) return #value end
 devfs = { close = function() end }
 assert(load(source, "src/vfs.lua"))()

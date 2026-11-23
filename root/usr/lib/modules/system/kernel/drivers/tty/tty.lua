@@ -2,8 +2,6 @@
 local devfs = require("devfs")
 ---@type module
 local module = require("module")
----@type vfs
-local fs = require("filesystem") --[[@as vfs]]
 ---@type system
 local system = require("system")
 ---@type process
@@ -60,6 +58,7 @@ end
 
 function tty_driver:read_pump(mask)
     self.reading = true
+    self.device:setInputCursor(self.in_pid)
     while self.reading do
         local ev = { event.pull() }
         local etype = ev[1]
@@ -121,6 +120,7 @@ function tty_driver:read_pump(mask)
                         self.reading = false
                     end
                 end
+                if self.reading then self.device:setInputCursor(self.in_pid) end
             end
         elseif etype == "key_up" then
             self.pressing[key] = false
@@ -135,6 +135,7 @@ function tty_driver:read_pump(mask)
             end
         end
     end
+    self.device:setInputCursor(nil)
 end
 
 function tty_driver:readBytes(n, mask)
@@ -305,9 +306,20 @@ local tty = {}
 
 function tty.new(id)
     local dev = setmetatable({}, {__index = tty_driver})
-    devfs.create("tty" .. tostring(id), dev)
     dev.id = id
     dev:init()
+    local callbacks = {
+        read = function(_handle, ...)
+            if not dev.device then return nil, "TTY detached" end
+            return dev:read(...)
+        end,
+        write = function(_handle, value)
+            if not dev.device then return false, "TTY detached" end
+            dev:write(value)
+            return true
+        end,
+    }
+    devfs.create("tty" .. tostring(id), callbacks)
     ttys[id] = dev
     return dev
 end

@@ -1,22 +1,78 @@
 -- Shell pipeline regressions. Run from nexus/: lua tests/sh_pipeline.lua
 local source = assert(io.open("root/usr/bin/sh.lua", "r")):read("*a")
 
-local function run(args, lines, spawn_failure, statuses, env_values)
-    local records, closed, output, errors, setenv, killed, waited = {}, {}, {}, {}, {}, {}, {}
+local function run(args, lines, spawn_failure, statuses, env_values, options)
+    local records, closed, file_closed, opened, dup2s, output, errors, setenv, killed, waited = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
     local next_fd, next_pid = 10, 100
     local children = {}
+    local directories = options and options.directories or {}
+    local real_paths = options and options.real_paths or {}
+    local function absolute(path)
+        local parts = {}
+        for part in path:gmatch("[^/]+") do
+            if part == ".." then parts[#parts] = nil
+            elseif part ~= "." then parts[#parts + 1] = part end
+        end
+        return "/" .. table.concat(parts, "/")
+    end
+    local function real_path(path)
+        local full = absolute(path)
+        return real_paths[full] or full
+    end
     local fs = {
         concat = function(...) return table.concat({...}, "/") end,
+        resolve = absolute,
+        realPath = real_path,
         exists = function(path)
+            local full = absolute(path)
+            if directories[full] then return true end
+            local parent, name = full:match("^(.*)/([^/]+)$")
+            if parent == "" then parent = "/" end
+            for _, entry in ipairs(directories[parent] or {}) do
+                if entry == name then return true end
+            end
             return path == "/usr/bin/sh.lua" or path == "/usr/ubin/cat" or path == "/usr/bin/cat"
-                or path == "/usr/ubin/true" or path == "/usr/ubin/false"
+                or path == "/usr/ubin/true" or path == "/usr/ubin/false" or path == "/usr/ubin/touch"
+        end,
+        can = function(path) return not options or absolute(path) ~= options.denied_directory end,
+        isDirectory = function(path) return directories[real_path(path)] ~= nil end,
+        list = function(path)
+            local entries = directories[real_path(path)]
+            if not entries then return nil, "Not a directory" end
+            local i = 0
+            return function()
+                i = i + 1
+                return entries[i]
+            end
         end,
         pipe = function()
             local rfd, wfd = next_fd, next_fd + 1
             next_fd = next_fd + 2
             return rfd, wfd
         end,
-        close = function(fd) closed[#closed + 1] = fd end
+        close = function(fd) closed[#closed + 1] = fd end,
+        open = function(path, mode)
+            local opened_record = { path = path, mode = mode }
+            opened[#opened + 1] = opened_record
+            if options and options.open_failure == path then return nil, "injected open failure" end
+            local fd = options and options.open_fd or next_fd
+            if fd == next_fd then next_fd = next_fd + 1 end
+            opened_record.fd = fd
+            return {
+                fd = function() return fd end,
+                close = function() file_closed[#file_closed + 1] = fd end
+            }
+        end,
+        dup = function(fd, minimum)
+            if options and options.dup_failure and options.dup_failure[fd] then return nil, "Bad file descriptor" end
+            local copy = math.max(next_fd, minimum or 0)
+            next_fd = copy + 1
+            return copy
+        end,
+        dup2 = function(source, target)
+            dup2s[#dup2s + 1] = { source = source, target = target }
+            return true
+        end
     }
     local proc = {
         cwd = function(path) if path then return path end return "/" end,
@@ -82,7 +138,7 @@ local function run(args, lines, spawn_failure, statuses, env_values)
         else error(result) end
     elseif not ok then error(result) end
     return { records = records, closed = closed, output = output, errors = errors, setenv = setenv,
-        killed = killed, waited = waited, code = code }
+        killed = killed, waited = waited, opened = opened, file_closed = file_closed, dup2s = dup2s, code = code }
 end
 
 local function test(name, fn)
@@ -129,6 +185,13 @@ test("spawn failure closes pipes and kills and reaps started children", function
     assert(#result.waited == 1 and result.waited[1].instance == result.records[1].instance)
 end)
 
+test("partial pipeline spawn failure closes redirection handles too", function()
+    local result = run({ "-c", "echo a>out|cat" }, {}, { at = 2 })
+    assert(result.code == 1 and #result.records == 1)
+    assert(#result.file_closed == 1)
+    assert(#result.killed == 1 and #result.waited == 1)
+end)
+
 test("-c returns last stage status", function()
     local result = run({ "-c", "true|false" })
     assert(result.code == 0, "stub defaults last process status to zero")
@@ -148,6 +211,74 @@ test("environment expansion cannot create a pipeline operator", function()
     assert(result.code == 0 and #result.records == 0)
 end)
 
+test("redirections split adjacent operators and map child descriptors", function()
+    local result = run({ "-c", "cat<input.txt|cat>out.txt" })
+    assert(result.code == 0 and #result.records == 2)
+    assert(result.opened[1].path == "input.txt" and result.opened[1].mode == "r")
+    assert(result.opened[2].path == "out.txt" and result.opened[2].mode == "w")
+    assert(result.records[1].stdio[0] >= 10)
+    assert(result.records[2].stdio[1] >= 10)
+    assert(#result.file_closed == 2)
+end)
+
+test("append and multiple redirects are opened left to right with last mapping winning", function()
+    local result = run({ "-c", "cat >first >second <input" })
+    assert(result.code == 0 and #result.records == 1)
+    assert(result.opened[1].mode == "w" and result.opened[2].mode == "w" and result.opened[3].mode == "r")
+    assert(result.records[1].stdio[1] == result.opened[2].fd)
+    assert(result.records[1].stdio[0] >= 10 and #result.file_closed == 3)
+end)
+
+test("append redirection uses append mode", function()
+    local result = run({ "-c", "cat >>log" })
+    assert(result.code == 0 and result.opened[1].mode == "a")
+end)
+
+test("quoted and escaped redirect operators remain literal arguments", function()
+    local result = run({ "-c", "cat 'a>b' c\\>d \"e>>f\"" })
+    assert(result.code == 0 and #result.records == 1)
+    assert(#result.opened == 0)
+    assert(result.records[1].args[1] == "a>b")
+    assert(result.records[1].args[2] == "c>d")
+    assert(result.records[1].args[3] == "e>>f")
+end)
+
+test("expansion cannot create a redirection operator", function()
+    local result = run({ "-c", "cat $VALUE" }, {}, nil, nil, { VALUE = "<input" })
+    assert(result.code == 0 and #result.opened == 0 and #result.records == 1)
+    assert(result.records[1].args[1] == "<input")
+end)
+
+test("missing targets and commands fail before opening any file", function()
+    for _, line in ipairs({ "cat >", "cat >>", "cat <", "cat > >out", " >file", "cat|>out" }) do
+        local result = run({ "-c", line })
+        assert(result.code == 2 and #result.opened == 0 and #result.records == 0, line)
+    end
+end)
+
+test("open failure closes prior files and starts no process", function()
+    local result = run({ "-c", "cat >first >second" }, {}, nil, nil, nil, { open_failure = "second" })
+    assert(result.code == 1 and #result.records == 0)
+    assert(#result.file_closed == 1)
+end)
+
+test("redirected standalone builtin restores parent descriptors", function()
+    local result = run({ "-c", "echo hello >out" })
+    assert(result.code == 0 and #result.records == 0)
+    assert(#result.dup2s == 2)
+    assert(result.dup2s[1].target == 1 and result.dup2s[2].target == 1)
+    assert(#result.file_closed == 1)
+end)
+
+test("redirected descriptor below three is duplicated and closed", function()
+    local result = run({ "-c", "cat <input" }, {}, nil, nil, nil, { open_fd = 0 })
+    assert(result.code == 0 and #result.records == 1)
+    assert(result.records[1].stdio[0] >= 10)
+    local found_safe_close = false
+    for _, fd in ipairs(result.closed) do if fd == result.records[1].stdio[0] then found_safe_close = true end end
+    assert(found_safe_close)
+end)
+
 test("single builtin runs in the parent shell", function()
     local result = run({}, { "export KEY=value" })
     assert(result.setenv.KEY == "value")
@@ -161,6 +292,71 @@ test("builtin in a pipeline runs in a child without changing the parent environm
     assert(result.records[1].args[1] == "--builtin" and result.records[1].args[2] == "export")
     assert(result.records[1].args[3] == "KEY=secret")
     assert(result.setenv.KEY == nil)
+end)
+
+local glob_fs = { directories = {
+    ["/"] = { "z.log", "dirB", ".hidden.log", "dirA", "dirC", "left|right.log", "a.log", "あ.log" },
+    ["/dirA"] = { "x.luac", "x.lua" },
+    ["/dirB"] = { "x.lua" },
+    ["/dirC"] = {},
+} }
+
+test("external commands receive sorted absolute and relative wildcard matches", function()
+    local result = run({ "-c", "touch /*.log dir*/x.lua" }, {}, nil, nil, nil, glob_fs)
+    assert(result.code == 0 and #result.records == 1)
+    assert(table.concat(result.records[1].args, ",") ==
+        "/a.log,/left|right.log,/z.log,/あ.log,dirA/x.lua,dirB/x.lua")
+end)
+
+test("glob classes, question marks, and explicit hidden names match", function()
+    local result = run({ "-c", "echo ?.log .*.log dir[!B]/x.lu[ab] [a-z].log" }, {}, nil, nil, nil, glob_fs)
+    assert(table.concat(result.output) == "a.log z.log あ.log .hidden.log dirA/x.lua a.log z.log\n")
+end)
+
+test("glob trailing slash matches directories only", function()
+    local result = run({ "-c", "echo */" }, {}, nil, nil, nil, glob_fs)
+    assert(table.concat(result.output) == "dirA/ dirB/ dirC/\n")
+end)
+
+test("quoting inside a bracket class protects negation and range markers", function()
+    local result = run({ "-c", [[echo ['!'].log [a'-'z].log]] }, {}, nil, nil, nil,
+        { directories = { ["/"] = { "!.log", "-.log", "a.log", "b.log", "z.log" } } })
+    assert(table.concat(result.output) == "!.log -.log a.log z.log\n")
+end)
+
+test("quotes and escapes protect wildcards and unmatched patterns remain unchanged", function()
+    local result = run({ "-c", [[echo '*.log' "*.log" \*.log "dir"*'/x.lua' absent* $MATCH "$MATCH"]] },
+        {}, nil, nil, { MATCH = "a.*" }, glob_fs)
+    assert(table.concat(result.output) == "*.log *.log *.log dirA/x.lua dirB/x.lua absent* a.log a.*\n")
+    local assignment = run({ "-c", "MATCH=*.log" }, {}, nil, nil, nil, glob_fs)
+    assert(assignment.setenv.MATCH == "*.log")
+end)
+
+test("glob results in pipelines remain literal argv and respect directory access", function()
+    local result = run({ "-c", "echo left* dirB/* | cat" }, {}, nil, nil, nil,
+        { directories = glob_fs.directories, denied_directory = "/dirB" })
+    assert(result.code == 0 and #result.records == 2)
+    assert(table.concat(result.records[1].args, ",") == "--builtin,echo,left|right.log,dirB/*")
+end)
+
+test("glob directory aliases honor the target's permissions", function()
+    local result = run({ "-c", "echo alias/*" }, {}, nil, nil, nil,
+        { directories = glob_fs.directories, real_paths = { ["/alias"] = "/dirB" }, denied_directory = "/dirB" })
+    assert(table.concat(result.output) == "alias/*\n")
+end)
+
+test("tilde and script arguments expand before pathname matching", function()
+    local result = run({ "-c", [[echo ~/x.* "$1" $1]], "test", "dirB/*" },
+        {}, nil, nil, { HOME = "/dirA" }, glob_fs)
+    assert(table.concat(result.output) == "/dirA/x.lua /dirA/x.luac dirB/* dirB/x.lua\n")
+end)
+
+test("redirection globbing requires an unambiguous path before opening files", function()
+    local result = run({ "-c", "cat <dirA/*.lua" }, {}, nil, nil, nil, glob_fs)
+    assert(result.code == 0 and #result.opened == 1 and result.opened[1].path == "dirA/x.lua")
+    result = run({ "-c", "cat >first <dir*/x.lua" }, {}, nil, nil, nil, glob_fs)
+    assert(result.code ~= 0 and #result.opened == 0 and #result.records == 0)
+    assert(table.concat(result.errors):find("ambiguous", 1, true))
 end)
 
 print("all shell pipeline tests passed")

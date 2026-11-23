@@ -80,8 +80,7 @@ function user.updateUsers()
     local content = file:readAll()
     file:close()
     for line in content:gmatch("[^\r\n]+") do
-        local username, password, uid, gid, gecos, home, shell = line:match(
-            "^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)")
+        local username, password, uid, gid, gecos, home, shell = line:match("^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)")
 
         if username then
             table.insert(users, {
@@ -128,7 +127,7 @@ function user.create(username, password, uid, gid, gecos, shell)
         shell,
     }, ":")
 
-    local hash = toHex(sha512(password))
+    local hash = toHex(sha512(password .. "salt"))
     -- Using base.getRealTime if available, else os.time
     local last_change = math.floor(os.time())
     local min_days = 0
@@ -199,7 +198,7 @@ function user.getUserByUID(uid)
 end
 
 function user.checkPasswordCorrect(username, passwd)
-    local passwd_hash = toHex(sha512(passwd))
+    local passwd_hash = toHex(sha512(passwd .. "salt"))
     local shadow = user_getShadow(username)
     if shadow and shadow.password == passwd_hash then
         return true
@@ -280,4 +279,13 @@ function user.init()
 
     vfs.chmod("/etc/shadow", 400)
     user.updateUsers()
+
+    if not vfs.exists("/root") then
+        local created, err = vfs.makeDirectory("/root")
+        if created then
+            vfs.chmod("/root", 0700)
+        else
+            printk("user: init: cannot create '/root': " .. tostring(err or "unknown error"))
+        end
+    end
 end

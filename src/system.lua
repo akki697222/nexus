@@ -42,8 +42,7 @@ kthreads = {}
 system.config = config
 
 -- Shutdown state is kernel private. The request is deliberately a single
--- slot: once accepted, later requests cannot change poweroff into reboot (or
--- vice versa).
+-- slot: once accepted, later requests cannot change poweroff into reboot (or vice versa).
 local shutdown_request
 local metadata_sync_active = false
 local metadata_sync_stopping = false

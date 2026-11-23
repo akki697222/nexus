@@ -15,6 +15,9 @@ local function fresh(options)
     local procs = {}
     local hooks = options.hooks or { "cleanup", "uname" }
     local startup = options.startup or { "alpha", "beta" }
+    local serviceKinds = options.serviceKinds or {}
+    local exitStatuses = options.exitStatuses or {}
+    local hangingSpawns = options.hangingSpawns or {}
 
     local function allocatePid()
         local pid = 2
@@ -34,6 +37,20 @@ local function fresh(options)
         listenSignal = function() end,
         exec = function(path)
             return addProcess(path)
+        end,
+        spawn = function(path)
+            local pid = addProcess(path)
+            local name = path:match("^/service/(.*)$")
+            if not hangingSpawns[name] then procs[pid].alive = false end
+            return pid, nil, procs[pid].instance
+        end,
+        wait = function(pid, instance)
+            local proc = procs[pid]
+            if not proc or proc.instance ~= instance then return "No such process", nil end
+            proc.alive = false
+            local exitStatus = exitStatuses[proc.path:match("^/service/(.*)$")] or 0
+            events[#events + 1] = { "wait", proc.path, pid, instance, exitStatus }
+            return nil, exitStatus
         end,
         get = function(pid)
             local proc = procs[pid]
@@ -76,6 +93,19 @@ local function fresh(options)
             return { type = "VREG" }
         end
     }
+    local serviceCatalog = {
+        find = function(name)
+            if not name:match("^[%w_][%w_%-]*$") then return nil, "Invalid service name" end
+            return "/etc/init.d/" .. name
+        end,
+        read = function(path, name)
+            if path ~= "/etc/init.d/" .. name then return nil, "missing " .. path end
+            return {
+                title = name, desc = "test service", execpath = "/service/" .. name,
+                args = {}, oneshot = serviceKinds[name] == "oneshot"
+            }
+        end
+    }
     local system = {
         config = { debug = false },
         shutdownRequested = function() return requested end,
@@ -100,20 +130,11 @@ local function fresh(options)
         require = function(name)
             local modules = {
                 computer = computer, colors = colors, filesystem = filesystem,
-                process = process, user = user, system = system
+                process = process, user = user, system = system,
+                ["openoc.service"] = serviceCatalog
             }
             assert(modules[name], "unexpected require: " .. name)
             return modules[name]
-        end,
-        loadfile = function(path)
-            local name = path:match("/etc/init%.d/([%w_%-]+)%.lua$")
-            if not name then return nil, "missing " .. path end
-            return function()
-                return {
-                    service = "program", title = name, desc = "test service",
-                    execpath = "/service/" .. name
-                }
-            end
         end,
         dofile = dofile,
         os = { getenv = function() return "test-host" end, setenv = function() end },
@@ -143,6 +164,67 @@ local function fresh(options)
         state = function() return coroutine.status(co) end
     }
 end
+
+local ordered = fresh({
+    startup = { "prepare", "broken", "after" }, hooks = {},
+    serviceKinds = { prepare = "oneshot", broken = "oneshot" },
+    exitStatuses = { broken = 7 }
+})
+ordered.tick(false)
+local prepareWait, brokenWait, afterExec
+for i, event in ipairs(ordered.events) do
+    if event[1] == "wait" and event[2] == "/service/prepare" then prepareWait = i end
+    if event[1] == "wait" and event[2] == "/service/broken" then brokenWait = i end
+    if event[1] == "exec" and event[2] == "/service/after" then afterExec = i end
+end
+assert(prepareWait and brokenWait and afterExec, "oneshot tasks wait and startup continues after failure")
+assert(prepareWait < brokenWait and brokenWait < afterExec, "oneshot startup tasks run in registration order")
+local killedOneShot = false
+for _, event in ipairs(ordered.events) do
+    if event[1] == "kill" and (event[2] == "/service/prepare" or event[2] == "/service/broken") then
+        killedOneShot = true
+    end
+end
+assert(not killedOneShot, "completed oneshot tasks are not stopped as running services")
+assert(table.concat(ordered.logs, "\n"):find("Exited with status 7", 1, true), "nonzero oneshot status is reported")
+
+local startupTimeout = fresh({
+    startup = { "hang", "after" }, hooks = {}, serviceKinds = { hang = "oneshot" },
+    hangingSpawns = { hang = true }
+})
+for _ = 1, 35 do startupTimeout.tick(false) end
+local hangKill, timeoutAfterExec
+for i, event in ipairs(startupTimeout.events) do
+    if event[1] == "kill" and event[2] == "/service/hang" then hangKill = i end
+    if event[1] == "exec" and event[2] == "/service/after" then timeoutAfterExec = i end
+end
+assert(hangKill and timeoutAfterExec and hangKill < timeoutAfterExec, "startup timeout kills a stuck oneshot and continues")
+assert(table.concat(startupTimeout.logs, "\n"):find("Timed out", 1, true), "startup timeout is reported")
+
+local shutdownOneshots = fresh({
+    startup = {}, hooks = { "prepare-stop", "bad-stop", "after-stop" },
+    serviceKinds = { ["prepare-stop"] = "oneshot", ["bad-stop"] = "oneshot" },
+    exitStatuses = { ["bad-stop"] = 9 }
+})
+shutdownOneshots.tick(false)
+shutdownOneshots.request(false)
+for _ = 1, 30 do
+    shutdownOneshots.tick(true)
+    if shutdownOneshots.events[#shutdownOneshots.events][1] == "finish" then break end
+end
+local prepareStopWait, badStopWait, afterStopWait, stopFinish
+for i, event in ipairs(shutdownOneshots.events) do
+    if event[1] == "wait" and event[2] == "/service/prepare-stop" then prepareStopWait = i end
+    if event[1] == "wait" and event[2] == "/service/bad-stop" then badStopWait = i end
+    if event[1] == "exec" and event[2] == "/service/after-stop" then afterStopWait = i end
+    if event[1] == "finish" then stopFinish = i end
+end
+assert(prepareStopWait and badStopWait and afterStopWait and stopFinish,
+    "shutdown oneshots run and finish despite a nonzero exit")
+assert(prepareStopWait < badStopWait and badStopWait < afterStopWait and afterStopWait < stopFinish,
+    "shutdown hooks preserve runlevel order and wait for each oneshot")
+assert(table.concat(shutdownOneshots.logs, "\n"):find("Exited with status 9", 1, true),
+    "nonzero shutdown oneshot status is reported")
 
 local function findEvent(events, kind, path)
     for index, event in ipairs(events) do
