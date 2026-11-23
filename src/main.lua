@@ -44,6 +44,26 @@ devfs.init()
 device.init()
 
 local function main()
+    -- Real-time clock: a fresh tmpfs file's modification time is the host's
+    -- wall clock. Done first so every vnode gets a real timestamp.
+    do
+        local ok, timestamp = pcall(function()
+            local volume = component.proxy(computer.tmpAddress())
+            if not volume then return end
+            local path = "/.nexus-boot-clock"
+            local handle = volume.open(path, "wb")
+            if not handle then return end
+            volume.close(handle)
+            local modified = volume.lastModified(path)
+            volume.remove(path)
+            return modified
+        end)
+        if ok and type(timestamp) == "number" and timestamp > 0 then
+            -- epoch seconds at uptime 0; getRealTime() adds uptime
+            bootRealTime = math.floor(timestamp / 1000 - computer.uptime())
+        end
+    end
+
     -- boot message
     printk("Nexus version " .. _OSVERSIONSTRING)
     local cpu = device.getFromType("processor") --[[@as device_manifest_cpu]]
@@ -153,23 +173,6 @@ local function main()
     end
 
     device.register()
-
-    do
-        local ok, timestamp = pcall(function()
-            local volume = component.proxy(computer.tmpAddress())
-            if not volume then return end
-            local path = "/.nexus-boot-clock"
-            local handle = volume.open(path, "wb")
-            if not handle then return end
-            volume.close(handle)
-            local modified = volume.lastModified(path)
-            volume.remove(path)
-            return modified
-        end)
-        if ok and type(timestamp) == "number" and timestamp > 0 then
-            bootRealTime = math.floor(timestamp / 1000)
-        end
-    end
 
     -- initialize tty
     if not config.console_force_framebuffer then

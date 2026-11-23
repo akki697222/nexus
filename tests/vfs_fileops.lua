@@ -245,7 +245,7 @@ local contents = existing:readAll()
 existing:close()
 local oldMtime = moved.mtime
 local touchNow = oldMtime + 100
-os.time = function() touchNow = touchNow + 1; return touchNow end
+getRealTime = function() touchNow = touchNow + 1; return touchNow end
 assert(vfs.touch("/right/renamed"))
 assert(moved.mtime == oldMtime + 101)
 local reread = assert(vfs.open("/right/renamed", "r"))

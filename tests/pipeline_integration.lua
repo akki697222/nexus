@@ -203,6 +203,7 @@ assert(#process.list() == 0)
 
 local env = setmetatable({
     fnv1a_hash = function() return 0 end,
+    getRealTime = os.time, -- kernel global from base.lua
     shellSource = readSource("root/usr/bin/sh.lua"),
     catSource = readSource("root/usr/ubin/cat.lua"),
 }, { __index = _G })

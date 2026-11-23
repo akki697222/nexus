@@ -87,8 +87,8 @@ local function createVNode(name, vtype, parent, fs, perm)
         children = {},
         fs       = fs,
         link     = nil,
-        mtime    = os.time(),
-        btime    = os.time(),
+        mtime    = getRealTime(),
+        btime    = getRealTime(),
         refcount = 1,
         mode     = perm or (vtype == "VDIR" and 0755 or 0644),
         uid      = 0,
@@ -119,6 +119,23 @@ end
 
 local loadDirMetadata
 
+-- Times are whole seconds since the Unix epoch (real time). Nodes found on
+-- disk without a .meta entry take the backing file's modification time,
+-- fetched on first use so that listing a directory stays cheap.
+---@param v vnode
+local function vnodeTimes(v)
+    if v.mtime == nil then
+        local t = 0
+        if v.fs and v.fs.lastModified then
+            local ok, ms = pcall(v.fs.lastModified, getFsRelativePath(v))
+            if ok and type(ms) == "number" and ms > 0 then t = math.floor(ms / 1000) end
+        end
+        v.mtime = t
+        if v.btime == nil then v.btime = t end
+    end
+    return v.mtime, v.btime
+end
+
 ---@param dir vnode
 ---@param name string
 ---@return vnode|nil
@@ -145,6 +162,7 @@ local function ensureLoaded(dir)
             if name ~= "" and name ~= ".meta" and not findChild(dir, name) then
                 local isDir = fs.isDirectory(vfs.concat(path, name))
                 local node = createVNode(name, isDir and "VDIR" or "VREG", dir, fs)
+                node.mtime, node.btime = nil, nil -- from the disk unless .meta says otherwise
                 if isDir then node.loaded = false end
             end
         end
@@ -1338,7 +1356,7 @@ function vfs.touch(path)
     if not (not proc or proc.euid == 0 or owner or vfs.can(authPath, "w")) then
         return false, "Permission denied"
     end
-    vnode.mtime = os.time()
+    vnode.mtime = getRealTime()
     markDirty(vnode.parent)
     return true
 end
@@ -1466,6 +1484,10 @@ function vfs.open(path, mode)
 
     function file:write(str)
         if not isOpen() then return nil, "file is closed" end
+        if vnode.type == "VREG" then
+            vnode.mtime = getRealTime()
+            markDirty(vnode.parent)
+        end
         return fs.write(handle, str)
     end
 
@@ -1532,6 +1554,7 @@ local function writeMeta(dirPath, children, fs)
         local persisted = child
         if child.mounted then persisted = child.covered end
         if persisted then
+            vnodeTimes(persisted)
             local linkPath = ""
             if persisted.type == "VLNK" and persisted.link then
                 if type(persisted.link) == "string" then
@@ -1817,6 +1840,10 @@ end
 function vfs.write(fd, value)
     local d = descriptor(fd)
     if not d or not (d.flag:find("w") or d.flag:find("a")) then return nil, "Bad file descriptor" end
+    if d.vnode and d.vnode.type == "VREG" then
+        d.vnode.mtime = getRealTime()
+        markDirty(d.vnode.parent)
+    end
     return (d.fs or devfs).write(d.fd, value)
 end
 
@@ -1908,6 +1935,7 @@ function vfs.attributes(path)
     if v.type == "VLNK" and v.link then
         link = type(v.link) == "string" and v.link or vfs.realPath(v.link)
     end
+    vnodeTimes(v)
     return {
         name  = v.name,
         type  = v.type,

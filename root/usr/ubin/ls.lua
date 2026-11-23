@@ -126,7 +126,7 @@ if long_list then
         local size = tostring(attr.size or "?")
 
         -- Time
-        local mtime = formatTime(attr.mtime and attr.mtime / 1000 or 0)
+        local mtime = formatTime(attr.mtime or 0)
 
         table.insert(tbl, { ftype .. perms, owner, group, size, mtime, display_name })
         items = items + 1
