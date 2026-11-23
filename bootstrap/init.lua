@@ -3,8 +3,8 @@
 -- SPDX-License-Identifier: MIT
 --
 -- Boots the kernel section of /boot/nexusos (NXIMG, see tools/nximg.lua).
--- Blocks are read and inflated one at a time and streamed into load(), so
--- the kernel source never exists as one string. Compressed images need a
+-- Blocks are inflated one at a time and fed to load() as separate pieces,
+-- so the kernel source never exists as one string. Compressed images need a
 -- data card; store images boot without one.
 --
 -- Development setups keep using root/init.lua, which loads a plain
@@ -132,19 +132,20 @@ elseif compression ~= 0 then
     fail("unknown compression " .. compression)
 end
 
--- Stream kernel blocks into load(). Store images are checked with the
--- section CRC; zlib blocks carry their own Adler-32, checked by the card.
-local nextBlock, lastBlock = kernel.firstBlock, kernel.firstBlock + kernel.blockCount - 1
+-- Read and inflate every kernel block first, then hand the pieces to
+-- load(). The reader must not touch components: load() calls it from C,
+-- and component.invoke may yield once the per-tick call budget is spent
+-- ("attempt to yield across a C-call boundary"). The kernel source is
+-- still never concatenated into one string, and each piece is released as
+-- soon as the compiler has consumed it.
+local pieces = {}
+local lastBlock = kernel.firstBlock + kernel.blockCount - 1
 local total, crc = 0, 0
-local function reader()
-    if nextBlock > lastBlock then
-        return nil
-    end
-    local i = nextBlock
-    nextBlock = nextBlock + 1
+for i = kernel.firstBlock, lastBlock do
     local a, b = blockOffset(i), blockOffset(i + 1)
     local stored = readAt(dataOffset + a, b - a)
     local raw = inflate and inflate(stored) or stored
+    stored = nil
     local want = i == lastBlock and (kernel.rawSize - (kernel.blockCount - 1) * blockSize) or blockSize
     if #raw ~= want then
         fail("kernel block " .. i .. " has wrong size")
@@ -153,21 +154,28 @@ local function reader()
     if not inflate then
         crc = crc32(raw, crc)
     end
-    return raw
+    pieces[#pieces + 1] = raw
 end
-
-local chunk, loadErr = load(reader, "=kernel", "t", _ENV)
 invoke(bootAddress, "close", handle)
-if not chunk then
-    fail("cannot load kernel: " .. tostring(loadErr))
-end
-if nextBlock <= lastBlock or total ~= kernel.rawSize then
+if total ~= kernel.rawSize then
     fail("kernel section incomplete")
 end
 if not inflate and crc ~= kernel.crc then
     fail("kernel checksum mismatch")
 end
-reader, meta = nil, nil
+meta = nil
+
+local nextPiece = 0
+local chunk, loadErr = load(function()
+    nextPiece = nextPiece + 1
+    local piece = pieces[nextPiece]
+    pieces[nextPiece] = nil
+    return piece
+end, "=kernel", "t", _ENV)
+pieces = nil
+if not chunk then
+    fail("cannot load kernel: " .. tostring(loadErr))
+end
 
 local ok, err = xpcall(chunk, debug.traceback, table.unpack(KERNEL_ARGS))
 if not ok then

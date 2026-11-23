@@ -82,7 +82,23 @@ local function boot(files, options)
         end,
     }
     local computer = { getBootAddress = function() return "boot" end }
-    local env = setmetatable({ component = component, computer = computer }, { __index = _G })
+    -- OC's component.invoke may yield (call budget); yielding inside the
+    -- load() reader fails, so any invoke during load() is an error here.
+    local loading = false
+    local raw_invoke = component.invoke
+    component.invoke = function(...)
+        if loading then error("attempt to yield across a C-call boundary") end
+        return raw_invoke(...)
+    end
+    local function guarded_load(...)
+        loading = true
+        local results = table.pack(pcall(load, ...))
+        loading = false
+        if not results[1] then error(results[2], 0) end
+        return table.unpack(results, 2, results.n)
+    end
+    local env = setmetatable({ component = component, computer = computer, load = guarded_load },
+        { __index = _G })
     env._G = env
     local chunk = assert(load(init_source, "=init.lua", "t", env))
     local ok, err = pcall(chunk)
