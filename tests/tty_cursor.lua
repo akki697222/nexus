@@ -19,7 +19,10 @@ local gpu = {
     setBackground = function(color) background = color end,
     getActiveBuffer = function() return active end,
     setActiveBuffer = function(buffer) active = buffer end,
-    set = function(x, y, text) frames[active][key(x, y)] = { text, background } end,
+    -- like OC: the string is written horizontally, one cell per character
+    set = function(x, y, text)
+        for i = 1, #text do frames[active][key(x + i - 1, y)] = { text:sub(i, i), background } end
+    end,
     fill = function(x, y, w, h, text)
         for sy = y, y + h - 1 do
             for sx = x, x + w - 1 do frames[active][key(sx, sy)] = { text, background } end
