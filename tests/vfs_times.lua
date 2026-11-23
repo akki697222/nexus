@@ -207,5 +207,14 @@ assert(vfs.saveMetadata())
 local meta = fsA.content("/pre/.meta")
 assert(meta and meta:find("^old%.txt:VREG:%d+:" .. (now - 60) .. ":1700000000:"), meta)
 
+-- 6. chmod takes Nexus notation only and reports success.
+assert(vfs.chmod("/new.txt", 640) == true)
+assert(vfs.attributes("/new.txt").mode == 640)
+for _, bad in ipairs({ 8, 999, 17777, -1, "rwx", 1.5 }) do
+    local ok, err = vfs.chmod("/new.txt", bad)
+    assert(not ok and err == "Invalid mode", "accepted mode " .. tostring(bad))
+end
+assert(vfs.attributes("/new.txt").mode == 640)
+
 for name, value in pairs(saved) do _G[name] = value end
 io.write("vfs time tests passed\n")

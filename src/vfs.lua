@@ -1500,9 +1500,15 @@ end
 
 ---@param path string
 ---@param mode integer
+-- `mode` uses the Nexus notation: octal digits written as a decimal number
+-- (755 = rwxr-xr-x, 4755 adds set-user-ID). Returns true on success.
 function vfs.chmod(path, mode)
     path = vfs.resolve(path)
     if not mode then return nil, "Mode does not specified" end
+    mode = math.tointeger(tonumber(mode))
+    if not mode or mode < 0 or mode > 7777 or not tostring(mode):match("^[0-7]+$") then
+        return nil, "Invalid mode"
+    end
 
     local vnode = vfsk.lookup(path)
     if not vnode then return nil, "No such file or directory" end
@@ -1520,6 +1526,7 @@ function vfs.chmod(path, mode)
 
     vnode.mode = mode
     markDirty(vnode.parent)
+    return true
 end
 
 ---@param path string
