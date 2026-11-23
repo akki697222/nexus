@@ -3,7 +3,7 @@ local properties = {}
 -- build settings
 properties.buildDir = "build"
 properties.buildOutput = "kernel.lua"
-properties.buildVersion = "0.1.1"
+properties.buildVersion = "0.0.3"
 -- include settings
 properties.includeDir = "src"
 properties.includes = {
@@ -16,6 +16,7 @@ properties.includes = {
     "vfs.lua",
     "devfs.lua",
     "procfs.lua",
+    "imgfs.lua",
     "package.lua",
     "process.lua",
     "thread.lua",
@@ -32,6 +33,4 @@ properties.includes = {
 }
 properties.overwrite = true
 properties.minify = false
--- gzip-compress the kernel image (requires LibDeflate in root/usr/lib)
-properties.compress = false
 return properties

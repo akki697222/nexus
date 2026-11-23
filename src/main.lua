@@ -1,6 +1,15 @@
 -- kernel entry point
 local kargs = { ... }
 
+local function kernelArg(name)
+    for _, value in ipairs(kargs) do
+        if type(value) == "string" then
+            local match = value:match("^" .. name .. "=(.*)")
+            if match then return match end
+        end
+    end
+end
+
 -- reassigns global (for luals autocompletion)
 ---@type vfs
 vfs = vfs
@@ -76,22 +85,46 @@ local function main()
     end
     vfs.chmod("/tmp", 1777)
 
+    -- Installed systems boot from an NXIMG (bootstrap/init.lua passes
+    -- image=): /usr is its read-only usr section, with modes and owners from
+    -- the image, and /etc is seeded from its etc section on first boot.
+    local imagePath = kernelArg("image")
+    if imagePath then
+        local boot = computer.getBootAddress()
+        local usr, e = imgfs.open(boot, imagePath, imgfs.SECTION.usr)
+        if not usr then
+            panic("not syncing", "imgfs: " .. imagePath .. ": " .. tostring(e))
+        end
+        local mounted, me = vfs.mount(usr, "/usr")
+        if not mounted then
+            panic("not syncing", "imgfs: unable to mount /usr: " .. tostring(me))
+        end
+        printk("imgfs: mounted " .. imagePath .. " on /usr (ro)")
+        local seeded, se = imgfs.seedEtc(boot, imagePath)
+        if not seeded then
+            printk("imgfs: unable to seed /etc: " .. tostring(se))
+        end
+    end
+
     vfs.link("/usr/sbin", "/sbin")
     vfs.link("/usr/bin", "/bin")
     vfs.link("/usr/ubin", "/ubin")
 
-    for path in vfs.list("/usr/bin") do
-        vfs.chmod(vfs.concat("/usr/bin", path), 0755)
-    end
-
-    for path in vfs.list("/usr/ubin") do
-        vfs.chmod(vfs.concat("/usr/ubin", path), 0755)
-    end
-
     -- Keep sudo as the only set-user-ID entry point. Its policy is immutable
-    -- to non-root users and defaults are installed in /etc/sudoers.
-    vfs.chown("/usr/bin/sudo.lua", 0, 0)
-    vfs.chmod("/usr/bin/sudo.lua", 04755)
+    -- to non-root users and defaults are installed in /etc/sudoers. An image
+    -- /usr already carries these modes and cannot be changed.
+    if not imagePath then
+        for path in vfs.list("/usr/bin") do
+            vfs.chmod(vfs.concat("/usr/bin", path), 0755)
+        end
+
+        for path in vfs.list("/usr/ubin") do
+            vfs.chmod(vfs.concat("/usr/ubin", path), 0755)
+        end
+
+        vfs.chown("/usr/bin/sudo.lua", 0, 0)
+        vfs.chmod("/usr/bin/sudo.lua", 04755)
+    end
     vfs.chown("/etc/sudoers", 0, 0)
     vfs.chmod("/etc/sudoers", 0440)
 

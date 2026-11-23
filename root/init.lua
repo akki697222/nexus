@@ -31,11 +31,11 @@ loadfile = function(file, env)
     return chunk
 end
 
-local f, e = loadfile("boot/loader.lua")
+local f, e = loadfile("boot/kernel.lua")
 if not f then
-    error("Unable to load kernel loader: " .. e)
+    error("Unable to load kernel: " .. e)
 else
-    local s, e = xpcall(f, debug.traceback)
+    local s, e = xpcall(f, debug.traceback, "init=/usr/sbin/init.lua")
     if not s then
         error(e)
     end

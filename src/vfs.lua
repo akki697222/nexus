@@ -1494,6 +1494,7 @@ function vfs.chmod(path, mode)
     end
 
     if not canModify then return nil, "Permission denied" end
+    if vnode.fs and vnode.fs.readOnlyImage then return nil, "Read-only file system" end
 
     vnode.mode = mode
     markDirty(vnode.parent)
@@ -1517,6 +1518,7 @@ function vfs.chown(path, uid, gid)
         end
     end
 
+    if vnode.fs and vnode.fs.readOnlyImage then return nil, "Read-only file system" end
     vnode.uid = uid
     vnode.gid = gid
     markDirty(vnode.parent)
