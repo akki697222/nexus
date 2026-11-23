@@ -296,9 +296,7 @@ local function main()
 
         resumeKernelThreads()
 
-        if ev.n > 0 then
-            process.dispatchWaiting(ev)
-        end
+        process.dispatchWaiting(ev)
 
         runProcessQueue(ev)
 

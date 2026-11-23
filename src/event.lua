@@ -17,6 +17,23 @@ event.handlers = handlers
 local queues = {}
 local foreground_pid = -1
 
+-- Events a process never pulls must not pile up forever.
+local MAX_QUEUE = 256
+
+-- Input events go to the foreground process only.
+local interactive_events = {
+    key_down = true,
+    key_up = true,
+    touch = true,
+    drag = true,
+    drop = true,
+    scroll = true,
+    clipboard = true
+}
+
+-- Deadline of each coroutine blocked in an event wait (weak keys).
+local wait_deadlines = setmetatable({}, { __mode = "k" })
+
 ------------------------------------------------------------
 -- local event queue
 ------------------------------------------------------------
@@ -155,30 +172,37 @@ end
 -- handler dispatch
 ------------------------------------------------------------
 
+-- Runs the handlers of the current context (its own and background ones)
+-- that are due for `ev`. Handlers of other processes are left untouched, so
+-- their timers and remaining counts are not consumed without running.
 local function dispatch_handlers(ev)
+    if next(handlers) == nil then return end
     local sig = ev[1]
     local now = computer.uptime()
+    local current = process.current
 
-    ---@type event_handler[]
-    local copy = {}
+    local due
     for id, h in pairs(handlers) do
-        copy[id] = h
+        if (h.pid == current or h.background)
+            and ((h.key == nil or h.key == sig) or now >= h.timeout) then
+            due = due or {}
+            due[#due + 1] = id
+        end
     end
+    if not due then return end
 
-    for id, h in pairs(copy) do
-        if (h.key == nil or h.key == sig) or now >= h.timeout then
+    for _, id in ipairs(due) do
+        local h = handlers[id]
+        -- an earlier callback may have cancelled it
+        if h then
             h.times = h.times - 1
             h.timeout = h.timeout + h.interval
-
-            if h.times <= 0 and handlers[id] == h then
+            if h.times <= 0 then
                 handlers[id] = nil
             end
-
-            if h.pid == process.current or h.background then
-                local ok, err = pcall(h.callback, table.unpack(ev, 1, ev.n))
-                if not ok and event.onError then
-                    pcall(event.onError, err)
-                end
+            local ok, err = pcall(h.callback, table.unpack(ev, 1, ev.n))
+            if not ok and event.onError then
+                pcall(event.onError, err)
             end
         end
     end
@@ -188,10 +212,34 @@ end
 -- core wait primitive
 ------------------------------------------------------------
 
-local function wait_event()
+-- Next queued event, blocking until one arrives or `deadline` passes. The
+-- scheduler resumes the waiter with its start arguments, which are not an
+-- event: the event itself is always taken from the queue.
+local function wait_event(deadline)
     local ev = pop_local()
     if ev then return ev end
-    return table.pack(coroutine.yield("__event_wait__"))
+    local co = coroutine.running()
+    wait_deadlines[co] = deadline
+    coroutine.yield("__event_wait__")
+    wait_deadlines[co] = nil
+    return pop_local()
+end
+
+-- Whether the scheduler should wake `entry` (a process or thread blocked in
+-- an event wait): it has queued events, its deadline passed, or one of its
+-- handlers is due for `ev` (nil or empty when no signal arrived).
+function event.wants(entry, now, ev)
+    local q = queues[entry.pid]
+    if q and q[1] then return true end
+    local deadline = entry.thread and wait_deadlines[entry.thread]
+    if deadline and now >= deadline then return true end
+    local sig = ev and ev.n > 0 and ev[1] or nil
+    for _, h in pairs(handlers) do
+        if h.pid == entry.pid and (now >= h.timeout or (sig and (h.key == nil or h.key == sig))) then
+            return true
+        end
+    end
+    return false
 end
 
 ------------------------------------------------------------
@@ -212,7 +260,7 @@ function event.pullFiltered(...)
     local deadline = computer.uptime() + (seconds or math.huge)
 
     repeat
-        local ev = wait_event()
+        local ev = wait_event(deadline)
         if ev and ev.n > 0 then
             dispatch_handlers(ev)
             if not filter or filter(table.unpack(ev, 1, ev.n)) then
@@ -242,19 +290,11 @@ end
 function event.dispatch(ev)
     if not ev or ev.n == 0 then return end
 
-    local interactive_events = {
-        key_down = true,
-        key_up = true,
-        touch = true,
-        drag = true,
-        drop = true,
-        scroll = true,
-        clipboard = true
-    }
     local is_interactive = interactive_events[ev[1]]
 
     for pid, q in pairs(queues) do
         if not is_interactive or pid == foreground_pid then
+            if #q >= MAX_QUEUE then table.remove(q, 1) end
             q[#q + 1] = ev
         end
     end
