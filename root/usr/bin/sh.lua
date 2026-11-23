@@ -447,6 +447,46 @@ end
 
 local builtins = {}
 
+-- Interactive history: kept in memory for the line editor and appended to
+-- ~/.sh_history as commands are entered.
+local HISTORY_LIMIT = 200
+local shell_history = {}
+
+local function history_file()
+    local home = home_path()
+    if home then return fs.concat(home, ".sh_history") end
+end
+
+local function read_history()
+    local entries = {}
+    local path = history_file()
+    if not path or not fs.exists(path) then return entries end
+    local f = fs.open(path, "r")
+    if not f then return entries end
+    local data = f:read("*a") or ""
+    f:close()
+    for line in data:gmatch("[^\n]+") do entries[#entries + 1] = line end
+    return entries
+end
+
+builtins["history"] = function(args)
+    local path = history_file()
+    if args[2] == "-c" then
+        for i = #shell_history, 1, -1 do shell_history[i] = nil end
+        if path then
+            local f = fs.open(path, "w")
+            if f then f:close() end
+        end
+        return 0
+    end
+    local entries = read_history()
+    local first = math.max(1, #entries - HISTORY_LIMIT + 1)
+    for i = first, #entries do
+        io.write(string.format("%5d  %s\n", i, entries[i]))
+    end
+    return 0
+end
+
 builtins["cd"] = function(args)
     local target = args[2] or home_path() or "/"
     local cwd, err = process.cwd(target)
@@ -532,6 +572,7 @@ builtins["help"] = function(args)
         { "unset KEY",         "環境変数を削除する" },
         { "env",               "環境変数一覧を表示する" },
         { "exit [code]",       "シェルを終了する" },
+        { "history [-c]",      "コマンド履歴を表示する (-c で消去)" },
         { "help",              "このヘルプを表示する" },
     }
     for _, row in ipairs(list) do
@@ -943,6 +984,84 @@ end
 
 local last_exit = 0
 
+-- Tab completion: command names for the first word, paths otherwise.
+local function complete(before)
+    local word = before:match("(%S*)$")
+    local head = before:sub(1, #before - #word)
+    local out, seen = {}, {}
+    local function add(s)
+        if not seen[s] then
+            seen[s] = true
+            out[#out + 1] = head .. s
+        end
+    end
+    local function list(dir)
+        local ok, iter = pcall(fs.list, dir)
+        if ok and type(iter) == "function" then return iter end
+        return function() return nil end
+    end
+
+    if not head:find("%S") and not word:find("/") then
+        for name in pairs(builtins) do
+            if name:sub(1, #word) == word then add(name) end
+        end
+        local path_env = os.getenv("PATH") or "/usr/ubin:/usr/bin:/bin"
+        for dir in path_env:gmatch("[^:]+") do
+            for name in list(dir) do
+                name = name:gsub("/$", ""):gsub("%.lua$", "")
+                if name:sub(1, #word) == word then add(name) end
+            end
+        end
+        if #out == 1 then out[1] = out[1] .. " " end
+        return out
+    end
+
+    local dir, base = word:match("^(.*/)([^/]*)$")
+    if not dir then dir, base = "", word end
+    local real = dir
+    if real:sub(1, 2) == "~/" then real = (home_path() or "/") .. real:sub(2) end
+    local cwd = process.cwd() or "/"
+    local target = real == "" and cwd or (real:sub(1, 1) == "/" and real or fs.concat(cwd, real))
+    target = target:gsub("(.)/+$", "%1")
+    for name in list(target) do
+        name = name:gsub("/$", "")
+        if name:sub(1, #base) == base and (base:sub(1, 1) == "." or name:sub(1, 1) ~= ".") then
+            add(dir .. name .. (fs.isDirectory(fs.concat(target, name)) and "/" or ""))
+        end
+    end
+    if #out == 1 and not out[1]:find("/$") then out[1] = out[1] .. " " end
+    return out
+end
+
+local function interactive()
+    return io.isatty ~= nil and io.isatty(0) == true
+end
+
+local function remember(line)
+    local path = history_file()
+    if not path then return end
+    local f = fs.open(path, "a")
+    if f then
+        f:write(line .. "\n")
+        f:close()
+    end
+end
+
+do
+    local entries = read_history()
+    local first = math.max(1, #entries - HISTORY_LIMIT + 1)
+    for i = first, #entries do shell_history[#shell_history + 1] = entries[i] end
+    -- keep the file from growing without bound
+    if #entries > HISTORY_LIMIT * 2 then
+        local path = history_file()
+        local f = path and fs.open(path, "w")
+        if f then
+            f:write(table.concat(shell_history, "\n") .. "\n")
+            f:close()
+        end
+    end
+end
+
 do
     local home = home_path()
     if home then
@@ -966,7 +1085,12 @@ end
 while true do
     io.write(get_prompt())
 
-    local line = io.read()
+    local line
+    if interactive() then
+        line = io.read("*l", { history = shell_history, historyLimit = HISTORY_LIMIT, complete = complete })
+    else
+        line = io.read()
+    end
     if not line then
         -- EOF (Ctrl+D)
         print("exit")
@@ -975,6 +1099,7 @@ while true do
 
     line = line:match("^%s*(.-)%s*$")
 
+    if line ~= "" and interactive() then remember(line) end
     if line ~= "" then
         last_exit = run_line(line)
         if last_exit ~= nil then
