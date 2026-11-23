@@ -60,6 +60,11 @@ driver.register("screen", {
     default = "root",
 })
 
+-- Sound output is an ordinary user facility: the OCCE audio card ("audio")
+-- and the sound card ("sound") are usable by every process.
+driver.register("audio", { methods = {}, default = "all" })
+driver.register("sound", { methods = {}, default = "all" })
+
 -- fallback for component types without a dedicated definition
 local generic = { methods = {}, default = "root" }
 
