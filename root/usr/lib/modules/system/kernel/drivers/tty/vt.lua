@@ -220,6 +220,20 @@ function vt_driver:reset()
     gpu.fill(1, 1, self.width, self.height, " ")
 end
 
+function vt_driver:clear()
+    local gpu = self.gpu
+    if not gpu then return end
+    
+    self.buf = { text = "", fg = {}, bg = {} }
+    self.cx, self.cy = 1, 1
+    self.scscroll = 0
+    self.dirty = true
+
+    gpu.setForeground(0xFFFFFF)
+    gpu.setBackground(0x000000)
+    gpu.fill(1, 1, self.width, self.height, " ")
+end
+
 function vt_driver:read(n) return "" end
 
 -- ============================================================

@@ -15,7 +15,7 @@ function io.write(...)
 end
 
 function io.read(...)
-    return vfs.read(0, ...) or ""
+    return vfs.read(0, ...)
 end
 
 function io.isatty(fd)

@@ -56,7 +56,40 @@ function tty_driver:init()
     self.device = vt.new(self.id)
 end
 
-function tty_driver:read_pump(mask)
+-- Expand the current line to the longest common prefix of the hints returned
+-- by the reader's completion callback.
+function tty_driver:complete(hint)
+    if not hint or not self.device then return end
+    local ok, hints = pcall(hint, self.buffer, #self.buffer + 1)
+    if not ok or type(hints) ~= "table" then return end
+
+    local completion
+    for _, candidate in ipairs(hints) do
+        if type(candidate) == "string" and candidate ~= "" then
+            if not completion then
+                completion = candidate
+            else
+                local limit = math.min(#completion, #candidate)
+                local i = 1
+                while i <= limit and completion:sub(i, i) == candidate:sub(i, i) do
+                    i = i + 1
+                end
+                completion = completion:sub(1, i - 1)
+            end
+        end
+    end
+
+    if not completion or #completion <= #self.buffer then return end
+    if completion:sub(1, #self.buffer) ~= self.buffer then return end
+
+    local inserted = completion:sub(#self.buffer + 1)
+    self.buffer = completion
+    if not self.flags.disableWriteCharInput then
+        self.device:write(inserted)
+    end
+end
+
+function tty_driver:read_pump(mask, hint)
     self.reading = true
     self.device:setInputCursor(self.in_pid)
     while self.reading do
@@ -71,7 +104,10 @@ function tty_driver:read_pump(mask)
                 self.pressingChars[char] = true
 
                 if self.flags.canonical then
-                    if char == 13 then
+                    if char == 9 then
+                        -- Tab (completion)
+                        self:complete(hint)
+                    elseif char == 13 then
                         -- Enter
                         self.read_buffer = self.read_buffer .. self.buffer .. "\n"
                         self.buffer = ""
@@ -150,10 +186,10 @@ function tty_driver:readBytes(n, mask)
     return out
 end
 
-function tty_driver:readLine(chop, mask)
+function tty_driver:readLine(chop, mask, hint)
     while not self.read_buffer:find("\n") do
         if self.eof then break end
-        self:read_pump(mask)
+        self:read_pump(mask, hint)
     end
     local p = self.read_buffer:find("\n")
     if p then
@@ -232,6 +268,14 @@ function tty_driver:read(...)
     self.eof = false
 
     local formats = table.pack(...)
+    -- A trailing function is a completion callback for line reads. It is not
+    -- a format, so remove it before parsing the format list.
+    local hint
+    if formats.n > 0 and type(formats[formats.n]) == "function" then
+        hint = formats[formats.n]
+        formats[formats.n] = nil
+        formats.n = formats.n - 1
+    end
     if formats.n == 0 then formats = { "*l", n = 1 } end
 
     local results = {}
@@ -252,15 +296,15 @@ function tty_driver:read(...)
         if type(fmt) == "number" then
             res = self:readBytes(fmt, mask)
         elseif type(fmt) == "boolean" then
-            res = self:readLine(true, mask)
+            res = self:readLine(true, mask, hint)
         else
             local mode = fmt:gsub("^%*", "")
             if mode == "n" then
                 res = self:readNumber(mask)
             elseif mode == "l" then
-                res = self:readLine(true, mask)
+                res = self:readLine(true, mask, hint)
             elseif mode == "L" then
-                res = self:readLine(false, mask)
+                res = self:readLine(false, mask, hint)
             elseif mode == "a" then
                 res = self:readAll(mask)
             else
@@ -299,6 +343,10 @@ end
 
 function tty_driver:setCursor(cx, cy)
     return self.device:setCursor(cx, cy)
+end
+
+function tty_driver:clear()
+    self.device:clear()
 end
 
 ---@class module_tty
