@@ -129,6 +129,14 @@ if props.overwrite then
     end
 end
 
+-- devmgr only binds drivers listed in drivers.idx
+do
+    local depmod = assert(loadfile("tools/depmod.lua"))()
+    if not depmod.run("root/usr/lib/drivers") then
+        error("depmod failed")
+    end
+end
+
 print("Deploying ./root to ../ocelot/boot...")
 local exitCode = os.execute("xcopy \".\\root\\*\" \"..\\ocelot\\boot\\\" /E /I /Y > nul")
 
@@ -168,4 +176,4 @@ if deployToOC then
     end
 end
 
-print("Build complete!")
+print("Build complete!")

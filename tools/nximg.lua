@@ -348,6 +348,11 @@ local function cmd_build(args)
         for k, v in pairs(assert(loadfile(opts.attrs))()) do attrs[k] = v end
     end
     local kernel = read_file(opts.kernel or "build/kernel.lua")
+    -- refresh the driver index the kernel's devmgr requires
+    local depmod = assert(loadfile("tools/depmod.lua"))()
+    if not depmod.run((opts.usr or "root/usr") .. "/lib/drivers", nil, true) then
+        error("depmod failed", 0)
+    end
     local usr, usr_n = build_fs(opts.usr or "root/usr", "/usr", attrs)
     local etc, etc_n = build_fs(opts.etc or "root/etc", "/etc", attrs)
     local comp = opts.store and nximg.COMP_STORE or nximg.COMP_ZLIB
