@@ -132,13 +132,44 @@ local function newProcessApi(tier)
         end
         return false, "Operation not permitted"
     end
-    for _, name in ipairs({ "kill", "suspend", "resume_handle" }) do
+    for _, name in ipairs({ "suspend", "resume_handle" }) do
         local f = process[name]
         api[name] = function(pid, ...)
             local ok, e = maySignal(pid)
             if not ok then return false, e end
             return f(pid, ...)
         end
+    end
+    -- kill(2) on a group: every member the caller may signal; fails only
+    -- when there is none (EPERM if members exist but none is allowed)
+    function api.killpg(pgid, sig)
+        local found, sent, err = false, false, "No such process"
+        for _, info in ipairs(process.list()) do
+            local p = process.get(info.pid)
+            if p and p.pgid == pgid and p.tid == p.pid then
+                found = true
+                local ok, e = maySignal(p.pid)
+                if ok then
+                    process.kill(p.pid, sig)
+                    sent = true
+                else
+                    err = e
+                end
+            end
+        end
+        if sent then return true end
+        return false, found and err or "No such process"
+    end
+    function api.kill(pid, sig)
+        if math.type(pid) == "integer" and pid < 0 then
+            if sig ~= nil and (math.type(sig) ~= "integer" or sig < 1 or sig > 31) then
+                return false, "Invalid signal"
+            end
+            return api.killpg(-pid, sig or 9)
+        end
+        local ok, e = maySignal(pid)
+        if not ok then return false, e end
+        return process.kill(pid, sig)
     end
     return api
 end
