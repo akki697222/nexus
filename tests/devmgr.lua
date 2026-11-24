@@ -323,9 +323,53 @@ devmgr.handleEvent("component_added", "u1", "mystery")
 for _, e2 in ipairs(devmgr.list()) do states[e2.address] = e2 end
 assert(states.u1.state == "unbound")
 
+-- userland admin wrappers need root
+current = { pid = 7, uid = 1000, euid = 1000, gid = 1000, egid = 1000 }
+assert(select(2, device.bind("c3")) == "Permission denied")
+assert(select(2, device.unbind("c3")) == "Permission denied")
+assert(select(2, device.rescan()) == "Permission denied")
+assert(#device.bindings() > 0 and #device.drivers() > 0, "listing is open to everyone")
+current = { pid = 0, uid = 0, euid = 0, gid = 0, egid = 0 }
+assert(device.bind("c3") and device.unbind("c3"))
+
 -- driver listing
 local names = {}
 for _, d in ipairs(devmgr.drivers()) do names[d.name] = d end
 assert(names.chatbox and not names.chatbox.loaded and names.spy.loaded)
+
+------------------------------------------------------------
+-- end to end: depmod output + the printer3d sample driver
+------------------------------------------------------------
+do
+    local depmod = assert(loadfile("tools/depmod.lua"))()
+    local src = readSource("root/usr/lib/drivers/printer3d.lua")
+    local text, _, errs = depmod.generate({ { name = "printer3d", source = src } })
+    assert(#errs == 0)
+    files["/usr/lib/drivers/drivers.idx"] = text
+    files["/usr/lib/drivers/printer3d.lua"] = src
+    assert(devmgr.rescan())
+    local committed
+    proxies.p1 = {
+        address = "p1",
+        status = function() return "idle", true end,
+        getMaxShapeCount = function() return 24 end,
+        reset = function() end, setLabel = function() end,
+        addShape = function() return true end,
+        commit = function(n) committed = n; return true end,
+    }
+    components.p1 = "printer3d"
+    devmgr.handleEvent("component_added", "p1", "printer3d")
+    assert(devfs.exists("printer0"))
+    local lp = groups[#groups]
+    assert(lp.name == "lp" and devRoot.children.printer0.gid == lp.gid)
+    current = { pid = 9, uid = 1001, euid = 1001, gid = 1001, egid = 1001 }
+    assert(select(2, device.open("/dev/printer0", "w")) == "Permission denied")
+    lp.members = { "bob" }
+    local p = assert(device.open("/dev/printer0", "w"))
+    assert(p.print({ label = "x", shapes = { { 0, 0, 0, 1, 1, 1, texture = "t" } } }, 4))
+    assert(committed == 4 and lastSignal("printer_job")[2] == "p1")
+    assert(p.status == nil, "a w handle has no r ops")
+    assert(device.close(p))
+end
 
 print("devmgr tests passed")

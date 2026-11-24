@@ -460,6 +460,37 @@ function devmgr.drivers()
 end
 
 ------------------------------------------------------------
+-- userland administration (devctl)
+------------------------------------------------------------
+
+local function isRoot()
+    local cur = process.getCurrent()
+    return cur == nil or (cur.euid or cur.uid) == 0
+end
+
+-- Driver index and binding state; readable by anyone.
+function device.drivers() return devmgr.drivers() end
+
+function device.bindings() return devmgr.list() end
+
+function device.bind(address, driverName)
+    checkArg(1, address, "string")
+    if not isRoot() then return nil, "Permission denied" end
+    return devmgr.bind(address, driverName)
+end
+
+function device.unbind(address)
+    checkArg(1, address, "string")
+    if not isRoot() then return nil, "Permission denied" end
+    return devmgr.unbind(address)
+end
+
+function device.rescan()
+    if not isRoot() then return nil, "Permission denied" end
+    return devmgr.rescan()
+end
+
+------------------------------------------------------------
 -- userland handles: device.open / device.close
 ------------------------------------------------------------
 

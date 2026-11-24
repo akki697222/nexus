@@ -161,6 +161,37 @@ end
 -- environments
 ------------------------------------------------------------
 
+-- module(7) for processes: root may load modules from /usr/lib/modules
+-- and unload them; the module objects themselves stay in the kernel.
+local MODULE_DIR = "/usr/lib/modules/"
+
+local function newModuleApi()
+    local api = functions(module, { autoload = true, load = true, unload = true, get = true })
+    local function isRoot()
+        local cur = process.getCurrent()
+        return cur ~= nil and cur.euid == 0
+    end
+    function api.load(path)
+        checkArg(1, path, "string")
+        if not isRoot() then return nil, "Permission denied" end
+        local real = vfs.resolve(path)
+        if not real or real:sub(1, #MODULE_DIR) ~= MODULE_DIR then
+            return nil, "modules must be under " .. MODULE_DIR
+        end
+        local mod, e = module.load(real, true)
+        if not mod then return nil, e end
+        return true, mod.manifest.name
+    end
+    function api.unload(name)
+        checkArg(1, name, "string")
+        if not isRoot() then return nil, "Permission denied" end
+        local e = module.unload(name, true)
+        if e then return nil, e end
+        return true
+    end
+    return api
+end
+
 local function newApis(tier)
     local component, computer = policy.libraries(tier)
     local devfsapi = { exists = devfs.exists, list = devfs.list, isDirectory = devfs.isDirectory }
@@ -186,7 +217,7 @@ local function newApis(tier)
         event      = functions(event),
         unicode    = functions(unicode),
         permission = functions(permission),
-        module     = functions(module),
+        module     = newModuleApi(),
         process    = newProcessApi(tier),
         devfs      = devfsapi,
         sha2       = { sha256 = sha256, sha512 = sha512 },

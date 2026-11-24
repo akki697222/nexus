@@ -29,9 +29,11 @@ function module.autoload()
     end
 end
 
+-- `privileged` is passed by the userland wrapper in env.lua after it has
+-- checked euid 0 and the path; userland never reaches this function itself.
 ---@return kernel_module|nil, string|nil # error
-function module.load(path)
-    if process.current > 0 then
+function module.load(path, privileged)
+    if process.current > 0 and not privileged then
         return nil, "Permission Denied"
     end
 
@@ -82,8 +84,8 @@ function module.load(path)
 end
 
 ---@return string|nil
-function module.unload(name)
-    if process.current > 0 then
+function module.unload(name, privileged)
+    if process.current > 0 and not privileged then
         return "Permission Denied"
     end
 
@@ -116,4 +118,16 @@ end
 
 function module.exists(name)
     return kmodule_loaded[name] ~= nil
+end
+
+-- Loaded modules, sorted by name: { name, desc, version }.
+---@return table[]
+function module.list()
+    local out = {}
+    for name, mod in pairs(kmodule_loaded) do
+        local man = mod.manifest or {}
+        out[#out + 1] = { name = name, desc = man.desc, version = man.version }
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
 end
