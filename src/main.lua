@@ -102,6 +102,7 @@ local function main()
             printk("mount: " .. e, "err")
             panic("not syncing", "devfs: unable to mount")
         end
+        devfs.postmount()
     end
     vfs.chmod("/tmp", 1777)
 

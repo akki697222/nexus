@@ -17,7 +17,8 @@ vhandles = vhandles
 
 ---@type table<integer, devfs_handle>
 local handles = {}
-local next_handle = 1
+-- handles 0-2 are the console descriptors (see devfs.init)
+local next_handle = 3
 
 ---@type module
 local module
@@ -25,16 +26,69 @@ local module
 local system
 
 function devfs.init()
-    local _, _, vstdin = devfs.create("stdin", system.console.stdin)
-    local _, _, vstdout = devfs.create("stdout", system.console.stdout)
-    local _, _, vstderr = devfs.create("stderr", system.console.stderr)
-
-    vhandles["0"] = { flag = "r", fd = 0, fs = devfs, vnode = vstdin }
-    vhandles["1"] = { flag = "w", fd = 1, fs = devfs, vnode = vstdout }
-    vhandles["2"] = { flag = "w", fd = 2, fs = devfs, vnode = vstderr }
+    -- The console descriptors. Their vnode (the console node) only exists once
+    -- /dev is mounted, see devfs.postmount().
+    vhandles["0"] = { flag = "r", fd = 0, fs = devfs }
+    vhandles["1"] = { flag = "w", fd = 1, fs = devfs }
+    vhandles["2"] = { flag = "w", fd = 2, fs = devfs }
     handles["0"] = { mode = "r", ops = system.console.stdin }
     handles["1"] = { mode = "w", ops = system.console.stdout }
     handles["2"] = { mode = "w", ops = system.console.stderr }
+end
+
+-- Console device ops. They resolve system.console on every call, so a later
+-- system.setConsole() is picked up by already created nodes.
+local consoleOps = {
+    read = function(handle, ...)
+        return system.console.stdin.read(handle, ...)
+    end,
+    write = function(handle, value)
+        return system.console.stdout.write(handle, value)
+    end,
+}
+
+---@param name string
+---@param target string
+---@return vnode|nil
+local function createSymlink(name, target)
+    local node = vfsk.createVNode("/dev", name, "VLNK", devfs, 777)
+    if node then
+        node.link = target
+        node.mode = 777
+    end
+    return node
+end
+
+-- Creates the nodes that need /dev to be mounted (they carry a mode, or are
+-- symlinks). Like Linux: /dev/console is root's, /dev/tty is the controlling
+-- terminal for everybody, and /dev/std* go through /proc/self/fd/N so that
+-- they follow the calling process's own descriptors.
+function devfs.postmount()
+    local _, _, vconsole = devfs.create("console", consoleOps, false, 620)
+    devfs.create("tty", consoleOps, false, 666)
+    -- /dev/null discards writes and reads as end of file; /dev/zero reads zeros
+    devfs.create("null", {
+        read = function() return nil end,
+        write = function() return true end,
+    }, false, 666)
+    devfs.create("zero", {
+        read = function(_, count)
+            if type(count) == "number" then return string.rep("\0", math.max(0, math.min(count, 4096))) end
+            return nil
+        end,
+        write = function() return true end,
+    }, false, 666)
+
+    if vconsole then
+        for i = 0, 2 do
+            vhandles[tostring(i)].vnode = vconsole
+        end
+    end
+
+    createSymlink("stdin", "/proc/self/fd/0")
+    createSymlink("stdout", "/proc/self/fd/1")
+    createSymlink("stderr", "/proc/self/fd/2")
+    createSymlink("fd", "/proc/self/fd")
 end
 
 local DEVFS_CHARS = "abcdefghijklnmopqrstuvwxyz"
