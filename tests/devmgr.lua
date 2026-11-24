@@ -18,6 +18,7 @@ local current = { pid = 0, uid = 0, euid = 0, gid = 0, egid = 0 }
 local groups = {
     { name = "root", gid = 0, members = { "root" } },
     { name = "chat", gid = 20, members = {} },
+    { name = "taken", gid = 100, members = {} },
 }
 local users = { [0] = { name = "root" }, [1000] = { name = "alice" }, [1001] = { name = "bob" } }
 
@@ -79,6 +80,10 @@ env = setmetatable({
     group = {
         getGroup = function(n) for _, g in ipairs(groups) do if g.name == n then return g end end end,
         getGroupByGID = function(gid) for _, g in ipairs(groups) do if g.gid == gid then return g end end end,
+        create = function(name, gid)
+            groups[#groups + 1] = { name = name, gid = gid, members = {} }
+            return true
+        end,
     },
     user = { getUserByUID = function(uid) return users[uid] end },
     process = { getCurrent = function() return current end },
@@ -207,7 +212,7 @@ files["/usr/lib/drivers/spy.lua"] = [[
     end }
 ]]
 files["/usr/lib/drivers/drivers.idx"] = files["/usr/lib/drivers/drivers.idx"]:gsub(
-    "}}\n$", "{ name = \"spy\", path = \"/usr/lib/drivers/spy.lua\", match = { \"spy_box\" }, depends = { \"sound\" } },\n}}\n")
+    "}}\n$", "{ name = \"spy\", path = \"/usr/lib/drivers/spy.lua\", match = { \"spy_box\" }, depends = { \"sound\" }, node = \"spy\", mode = 640, group = \"spies\" },\n}}\n")
 assert(devmgr.rescan())
 components.s1 = "spy_box"
 devmgr.handleEvent("component_added", "s1", "spy_box")
@@ -222,6 +227,9 @@ assert(spy.sound == modules.sound, "declared modules can be required")
 assert(tostring(spy.undeclared):find("not declared"), "undeclared modules are refused")
 assert(spy.proxyOk and spy.writeDev == false)
 assert(string.evil == nil, "drivers cannot modify the shared string library")
+local spiesGroup = groups[#groups]
+assert(spiesGroup.name == "spies" and spiesGroup.gid == 101, "missing groups are created with the lowest free system gid")
+assert(devRoot.children.spy0.gid == 101 and devRoot.children.spy0.mode == 640)
 
 ------------------------------------------------------------
 -- device.open / device.close

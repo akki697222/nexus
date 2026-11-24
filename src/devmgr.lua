@@ -200,15 +200,32 @@ end
 
 local nodeOwner = {} -- node name -> address
 
+-- System groups for driver-declared node groups take the lowest free gid
+-- in 100..999.
+local function createGroup(name)
+    for gid = 100, 999 do
+        if not group.getGroupByGID(gid) then
+            local ok, e = group.create(name, gid)
+            if ok == nil and e then
+                log("cannot create group '" .. name .. "': " .. tostring(e))
+                return nil
+            end
+            local g = group.getGroup(name)
+            if g then log("created group " .. name .. " (gid " .. gid .. ")") end
+            return g
+        end
+    end
+end
+
 local function allocNode(prefix, address, entry)
     local mode = tonumber(entry.mode) or 600
     local gid = 0
     if entry.group then
-        local g = group.getGroup(entry.group)
+        local g = group.getGroup(entry.group) or createGroup(entry.group)
         if g then
             gid = g.gid
         else
-            log("group '" .. entry.group .. "' not found for " .. entry.name .. ", using root")
+            log("cannot create group '" .. entry.group .. "' for " .. entry.name .. ", using root")
         end
     end
     for i = 0, 255 do
