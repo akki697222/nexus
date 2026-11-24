@@ -8,6 +8,7 @@ local system = require("system")
 local process = require("process")
 ---@type event
 local event = require("event")
+local computer = require("computer")
 
 ---@type tty_driver[]
 local ttys = {}
@@ -60,7 +61,15 @@ end
 local KEY_BACK, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 14, 200, 208, 203, 205
 local KEY_HOME, KEY_END, KEY_DELETE, KEY_PGUP, KEY_PGDN = 199, 207, 211, 201, 209
 local KEY_INSERT = 210
--- Keys that repeat while held (OC resends key_down without key_up).
+-- Keys that repeat while held. The tty repeats them itself on a timer from
+-- the first key_down until key_up; OC's own repeated key_down events are
+-- dropped, so a backlog of them can no longer carry the cursor on after
+-- the key is released.
+local REPEAT_DELAY = 0.4      -- seconds held before the first repeat
+local REPEAT_INTERVAL = 0.05  -- seconds between repeats (one game tick)
+-- Without OC's repeat events for this long, the key is taken as released
+-- (a key_up lost when the window loses focus, for example).
+local REPEAT_STALE = 1.0
 local REPEATABLE = {
     [KEY_BACK] = true, [KEY_UP] = true, [KEY_DOWN] = true, [KEY_LEFT] = true, [KEY_RIGHT] = true,
     [KEY_HOME] = true, [KEY_END] = true, [KEY_DELETE] = true, [KEY_PGUP] = true, [KEY_PGDN] = true,
@@ -255,6 +264,23 @@ function tty_driver:editKey(char, key, mask, hint)
     return true
 end
 
+-- One key press (or a repeat of a held key) while reading.
+function tty_driver:keyPress(char, key, canonical, mask, hint)
+    if canonical then
+        self.reading = self:editKey(char, key, mask, hint)
+    elseif self.rawRead and (not char or char == 0) and RAW_SEQUENCES[key] then
+        self.read_buffer = self.read_buffer .. RAW_SEQUENCES[key]
+        self.reading = false
+    elseif self.rawRead and char == 27 then
+        -- a lone Esc, distinct from the start of a sequence
+        self.read_buffer = self.read_buffer .. "\27\27"
+        self.reading = false
+    elseif char and char ~= 0 then
+        self.read_buffer = self.read_buffer .. utf8.char(char)
+        self.reading = false
+    end
+end
+
 function tty_driver:read_pump(mask, hint)
     self.reading = true
     local canonical = self.flags.canonical and not self.rawRead
@@ -266,35 +292,38 @@ function tty_driver:read_pump(mask, hint)
     end
     self.device:setInputCursor(self.in_pid)
     while self.reading do
-        local ev = { event.pull() }
+        -- wait for the next event, or until the held key is due to repeat
+        local held = self.held
+        local ev
+        if held then
+            ev = { event.pull(math.max(0, held.due - computer.uptime())) }
+        else
+            ev = { event.pull() }
+        end
         local etype = ev[1]
         local char = ev[3]
         local key = ev[4]
+        local now = computer.uptime()
 
         if etype == "key_down" then
-            local repeating = self.pressing[key] and (self.rawRead or REPEATABLE[key])
-            if not self.pressing[key] or repeating then
+            if self.pressing[key] then
+                -- OC's repeat of a held key: only proves it is still down
+                if held and held.key == key then held.seen = now end
+            else
                 self.pressing[key] = true
                 if char then self.pressingChars[char] = true end
-
-                if canonical then
-                    self.reading = self:editKey(char, key, mask, hint)
-                elseif self.rawRead and (not char or char == 0) and RAW_SEQUENCES[key] then
-                    self.read_buffer = self.read_buffer .. RAW_SEQUENCES[key]
-                    self.reading = false
-                elseif self.rawRead and char == 27 then
-                    -- a lone Esc, distinct from the start of a sequence
-                    self.read_buffer = self.read_buffer .. "\27\27"
-                    self.reading = false
-                elseif char and char ~= 0 then
-                    self.read_buffer = self.read_buffer .. utf8.char(char)
-                    self.reading = false
+                if self.rawRead or REPEATABLE[key] then
+                    self.held = { key = key, char = char, due = now + REPEAT_DELAY, seen = now }
+                else
+                    self.held = nil
                 end
+                self:keyPress(char, key, canonical, mask, hint)
                 if self.reading then self.device:setInputCursor(self.in_pid) end
             end
         elseif etype == "key_up" then
             self.pressing[key] = false
             if char then self.pressingChars[char] = false end
+            if held and held.key == key then self.held = nil end
         elseif etype == "clipboard" then
             if canonical then
                 -- paste into the line, up to the first line break
@@ -311,6 +340,17 @@ function tty_driver:read_pump(mask, hint)
                     self.device:write(mask or char)
                 end
                 self.reading = false
+            end
+        elseif held and self.held == held and now + 1e-6 >= held.due then
+            -- (uptime moves in ticks; 0.05 steps do not add up exactly)
+            if now - held.seen > REPEAT_STALE then
+                -- no sign of the key for a while: its key_up was lost
+                self.pressing[held.key] = false
+                self.held = nil
+            else
+                held.due = now + REPEAT_INTERVAL
+                self:keyPress(held.char, held.key, canonical, mask, hint)
+                if self.reading then self.device:setInputCursor(self.in_pid) end
             end
         end
     end
