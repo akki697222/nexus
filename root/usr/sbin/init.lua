@@ -2,7 +2,7 @@ if not (_OSVERSION and _NEXUS) then
     error("Error: This program cannot be run on other operating systems.")
 end
 
-_OPENOC_VERSION = "0.1.0"
+_OPENOC_VERSION = "0.0.5"
 
 ---@type oc_computer_lib
 local computer = require("computer")
