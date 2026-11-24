@@ -11,8 +11,8 @@ local compile = loadstring or load
 local unpackArgs = unpack or table.unpack
 local cpSource = read("root/usr/ubin/cp.lua")
 local mvSource = read("root/usr/ubin/mv.lua")
-local argparseSource = read("root/usr/lib/argparse.lua")
-local fileopsSource = read("root/usr/lib/fileops.lua")
+local argparseSource = read("root/usr/lib/libargparse.lua")
+local fileopsSource = read("root/usr/lib/libfileops.lua")
 
 local function normalize(path)
     local parts = {}

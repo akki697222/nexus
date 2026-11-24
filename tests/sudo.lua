@@ -7,7 +7,7 @@ local function read(path)
 end
 
 local sudo_source = read("root/usr/bin/sudo.lua")
-local argparse_source = read("root/usr/lib/argparse.lua")
+local argparse_source = read("root/usr/lib/libargparse.lua")
 local main_source = read("src/main.lua")
 local unpack_args = table.unpack or unpack
 
@@ -29,7 +29,7 @@ local function run(argv, options)
         ["/etc/passwd"] = "root:x:0:0:root:/root:/bin/sh.lua\ndebug:x:100:100:Debug:/home/debug:/bin/sh.lua\n",
         ["/etc/group"] = "root:0:root\nsudo:27:debug\n",
         ["/etc/sudoers"] = options.sudoers or "root ALL=(root) ALL\ndebug ALL=(root) ALL\n",
-        ["/usr/lib/argparse.lua"] = argparse_source,
+        ["/usr/lib/libargparse.lua"] = argparse_source,
     }
     local modes = options.modes or {}
     local process = {

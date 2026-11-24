@@ -70,7 +70,7 @@ local filesystem = { mounts = function()
     end
 end }
 local modules = {
-    argparse = assert(loadfile("root/usr/lib/argparse.lua"))(),
+    argparse = assert(loadfile("root/usr/lib/libargparse.lua"))(),
     device = device,
     filesystem = filesystem,
 }

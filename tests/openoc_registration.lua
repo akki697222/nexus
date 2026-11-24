@@ -33,7 +33,7 @@ local fs = {
         return { close = function() end }
     end,
 }
-local parserSource = assert(loadfile("root/usr/lib/argparse.lua"))
+local parserSource = assert(loadfile("root/usr/lib/libargparse.lua"))
 local services, errors
 local env = setmetatable({
     require = function(name)

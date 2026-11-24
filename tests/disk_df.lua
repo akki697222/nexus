@@ -8,7 +8,7 @@ local function read(path)
 end
 
 local dfSource = read("root/usr/ubin/df.lua")
-local argparseSource = read("root/usr/lib/argparse.lua")
+local argparseSource = read("root/usr/lib/libargparse.lua")
 local compile = loadstring or load
 local unpackArgs = unpack or table.unpack
 local volumes = {

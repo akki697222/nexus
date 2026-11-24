@@ -1,5 +1,5 @@
 -- CLI behavior for mount/umount. Run from Nexus: lua tests/mount_cli.lua
-local parserSource = assert(io.open("root/usr/lib/argparse.lua", "r")):read("*a")
+local parserSource = assert(io.open("root/usr/lib/libargparse.lua", "r")):read("*a")
 local mountSource = assert(io.open("root/usr/ubin/mount.lua", "r")):read("*a")
 local umountSource = assert(io.open("root/usr/ubin/umount.lua", "r")):read("*a")
 

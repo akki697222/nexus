@@ -12,7 +12,7 @@ local sources = {
     rmdir = read("root/usr/ubin/rmdir.lua"),
     rm = read("root/usr/ubin/rm.lua"),
     touch = read("root/usr/ubin/touch.lua"),
-    argparse = read("root/usr/lib/argparse.lua"),
+    argparse = read("root/usr/lib/libargparse.lua"),
 }
 local compile = loadstring or load
 local unpack_args = unpack or table.unpack

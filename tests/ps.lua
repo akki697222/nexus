@@ -8,7 +8,7 @@ local function read(path)
 end
 
 local ps_source = read("root/usr/ubin/ps.lua")
-local argparse_source = read("root/usr/lib/argparse.lua")
+local argparse_source = read("root/usr/lib/libargparse.lua")
 local compile = loadstring or load
 local unpack_args = unpack or table.unpack
 local processes = {

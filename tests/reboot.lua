@@ -6,7 +6,7 @@ local function read(path)
     return source
 end
 
-local parser_source = read("root/usr/lib/argparse.lua")
+local parser_source = read("root/usr/lib/libargparse.lua")
 local function run(command, argv, euid, request_error)
     local events, errors, output = {}, {}, {}
     local parser_chunk = assert(load(parser_source, "argparse.lua", "t", _ENV))
