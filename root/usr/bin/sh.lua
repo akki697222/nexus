@@ -1082,6 +1082,16 @@ do
     os.setenv("PWD", process.cwd() or "/")
 end
 
+-- An interactive shell leads its own process group, so Ctrl+C reaches the
+-- commands it runs (they inherit the group) and not the processes that
+-- started it. It catches SIGINT and SIGQUIT itself, like other Unix
+-- shells: a caught signal reverts to the default in commands it starts.
+if interactive() and process.signal then
+    if process.setpgid then process.setpgid(0, 0) end
+    process.signal(2, function() end)
+    process.signal(3, function() end)
+end
+
 while true do
     io.write(get_prompt())
 

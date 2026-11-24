@@ -47,7 +47,8 @@ local apis = {
     component = { list = function() return function() return "gpu" end end, proxy = function() return gpu end },
     computer = { uptime = function() return now end },
     event = { pull = coroutine.yield, setForeground = function() end, getForeground = function() return foreground end },
-    process = { get = function(pid) return pid == 2 and { instance = 1, signals = signals } or nil end,
+    process = { get = function(pid) return pid == 2 and { instance = 1, signals = signals, pgid = 7 } or nil end,
+                kill = function(pid, sig) signals[#signals + 1] = { pid, sig } end,
                 getCurrentPID = function() return 2 end, getCurrent = function() return { pid = 2, tty = 0 } end,
                 blockIO = function() coroutine.yield() end, wakeIO = function() wakes = wakes + 1 end },
     module = { require = function() return vt.module end },
@@ -166,25 +167,47 @@ assert(ok and coroutine.status(co) == "dead" and line == "ls", tostring(line))
 paint()
 assert(row(1) == "$ ls", row(1))
 
--- 7. Ctrl+C while nobody reads interrupts the foreground process and drops
--- pending input; while a line is read it ends the line.
+-- 7. Ctrl+C (SIGINT) and Ctrl+\ (SIGQUIT) go to the foreground process
+-- group whether or not anything reads, and drop pending input; a line
+-- being read ends empty so the shell prompts again.
+local function lastKill() local k = signals[#signals]; return k and (k[1] .. ":" .. k[2]) end
 down(("x"):byte(), A); up(("x"):byte(), A)
 foreground = 2
 local before = #signals
 down(3, 46); up(3, 46)
-assert(#signals == before + 1 and signals[#signals] == 2 and queued() == 0)
+assert(lastKill() == "-7:2" and #signals == before + 1 and queued() == 0, tostring(lastKill()))
 now = 25; down(3, 46); tty.tick(26); up(3, 46)
 assert(#signals == before + 2, "Ctrl+C does not repeat")
+down(28, 43); up(28, 43)
+assert(lastKill() == "-7:3" and queued() == 0, "Ctrl+\\ is SIGQUIT")
 term:write("$ ")
 co = coroutine.create(function() return term:read("*l") end)
 assert(coroutine.resume(co))
 assert(coroutine.status(co) == "suspended", "blocks with an empty queue")
-down(("y"):byte(), A); assert(coroutine.resume(co))
-down(3, 46); assert(coroutine.resume(co))
-assert(#signals == before + 3, "Ctrl+C in a read signals the reader")
-up(("y"):byte(), A); up(3, 46)
-down(13, ENTER); assert(coroutine.resume(co)); up(13, ENTER)
-assert(coroutine.status(co) == "dead", "the line typed before Ctrl+C is dropped")
+down(("y"):byte(), A); assert(coroutine.resume(co)); up(("y"):byte(), A)
+down(3, 46)
+local okc, got = coroutine.resume(co)
+up(3, 46)
+assert(okc and coroutine.status(co) == "dead" and got == "", "the line ends empty: " .. tostring(got))
+assert(lastKill() == "-7:2" and #signals == before + 4)
+paint()
+assert(row(2) == "$ y^C", row(2))
+
+-- 7b. A program that reads raw keys gets Ctrl+C as input, also between its
+-- reads; it stays raw until something reads in canonical mode again.
+before = #signals
+co = coroutine.create(function() return term:read(1, { raw = true }) end)
+assert(coroutine.resume(co))
+down(3, 46); up(3, 46)
+local _, rawc = coroutine.resume(co)
+assert(rawc == "\3" and #signals == before, "raw read: Ctrl+C is input")
+down(3, 46); up(3, 46)
+assert(#signals == before and queued() == 1, "between raw reads too")
+assert(term:read(1, { raw = true }) == "\3")
+co = coroutine.create(function() return term:read("*l") end)
+assert(coroutine.resume(co))
+down(3, 46); assert(coroutine.resume(co)); up(3, 46)
+assert(#signals == before + 1, "canonical again: Ctrl+C signals")
 
 -- 8. Raw reads take one key each; repeats keep coming across reads.
 now = 30

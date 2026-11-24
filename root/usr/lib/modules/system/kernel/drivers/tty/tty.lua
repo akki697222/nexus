@@ -94,7 +94,10 @@ local REPEAT_BURST = 4
 -- (its key_up was lost, for example when the window lost focus).
 local REPEAT_STALE = 1.0
 -- Ctrl+C and Ctrl+D act once per press.
-local NO_REPEAT_CHARS = { [3] = true, [4] = true }
+local NO_REPEAT_CHARS = { [3] = true, [4] = true, [28] = true }
+-- Keys that signal the foreground process group (Unix ISIG): Ctrl+C is
+-- SIGINT, Ctrl+\ is SIGQUIT.
+local INTERRUPT_CHARS = { [3] = 2, [28] = 3 }
 
 -- Raw mode: special keys arrive as the usual terminal escape sequences.
 local RAW_SEQUENCES = {
@@ -239,11 +242,12 @@ function tty_driver:editKey(char, key, mask, hint)
         self.device:write("\n")
         return false
     elseif char == 3 then
-        -- Ctrl+C (SIGINT)
+        -- Ctrl+C: the signal went out when the key arrived (see signal);
+        -- here the line is dropped and an empty one handed over, so a
+        -- shell that ignores SIGINT prompts again
         self:toInputEnd()
-        local proc = process.get(self.in_pid)
-        if proc then table.insert(proc.signals, 2) end
-        self.buffer, self.pos, self.read_buffer = "", 0, ""
+        self.device:write("^C\n")
+        self.buffer, self.pos, self.read_buffer = "", 0, "\n"
         return false
     elseif char == 4 then
         -- Ctrl+D: EOF on an empty line, otherwise hand over what was typed
@@ -307,6 +311,28 @@ function tty_driver:ownsInput()
     return last == nil or event.getForeground() == last
 end
 
+-- Whether Ctrl+C / Ctrl+\ send signals: in canonical mode, unless the
+-- foreground program reads raw keys (it gets them as input instead). A
+-- program that last read in raw mode keeps raw mode until another read.
+function tty_driver:signalsKeys()
+    if not self.flags.canonical then return false end
+    local reader = self:activeReader()
+    if reader then return not self.rawRead end
+    if self.lastRaw and self.lastReader and process.get(self.lastReader) then return false end
+    return true
+end
+
+-- Signals the foreground process group and drops pending input.
+function tty_driver:interrupt(sig)
+    local fg = process.get(event.getForeground())
+    if fg and fg.pgid then process.kill(-fg.pgid, sig) end
+    self.queue = {}
+    if self:activeReader() then
+        -- let the reader end its line
+        self:push({ char = 3, key = 46 })
+    end
+end
+
 -- Queues a token for readers and wakes them.
 function tty_driver:push(token)
     local q = self.queue
@@ -328,16 +354,15 @@ function tty_driver:signal(name, _, char, key)
         end
         self.keys[key] = char or 0
         if MODIFIERS[key] then return end
-        if not self:ownsInput() then
+        local sig = INTERRUPT_CHARS[char]
+        if sig and self:signalsKeys() then
+            -- ISIG: SIGINT / SIGQUIT to the foreground process group, and
+            -- the pending input is dropped. A line being read ends empty.
+            self:interrupt(sig)
             self.held = nil
             return
         end
-        if char == 3 and not self:activeReader() and self.flags.canonical then
-            -- Ctrl+C while nobody reads: interrupt the foreground process
-            -- and drop the pending input
-            local proc = process.get(event.getForeground())
-            if proc then table.insert(proc.signals, 2) end
-            self.queue = {}
+        if not self:ownsInput() then
             self.held = nil
             return
         end
@@ -566,6 +591,7 @@ function tty_driver:read(...)
     self.historyLimit = options and tonumber(options.historyLimit) or nil
     self.historyIndex, self.historyDraft = nil, nil
     self.rawRead = options and options.raw and true or false
+    self.lastRaw = self.rawRead
     if formats.n == 0 then formats = { "*l", n = 1 } end
 
     local results = {}

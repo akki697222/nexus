@@ -69,12 +69,19 @@ local function waitSpawned(pid, instance, deadline)
     return waitErr, exitStatus
 end
 
+-- Services and login run in process groups of their own, so a signal to
+-- one group (Ctrl+C at a terminal) never reaches the others or init.
+local function ownGroup(pid)
+    if process.setpgid then process.setpgid(pid, 0) end
+end
+
 local function startService(name)
     local service, path, err = readService(name)
     if not service then return nil, err or path end
     if service.oneshot then
         local pid, spawnErr, instance = process.spawn(service.execpath, service.args or {})
         if not pid or pid == -1 then return nil, spawnErr or "Unable to launch program" end
+        ownGroup(pid)
         if not instance then
             local snapshot = process.get(pid)
             instance = snapshot and snapshot.instance
@@ -90,6 +97,7 @@ local function startService(name)
     end
     local pid, exec_err = process.exec(service.execpath, service.args or {})
     if not pid or pid == -1 then return nil, exec_err or "Unable to launch program" end
+    ownGroup(pid)
     local snapshot = process.get(pid)
     local record = { name = name, pid = pid, instance = snapshot and snapshot.instance }
     status(0, "Started " .. service.title .. " (" .. service.desc .. ", PID " .. pid .. ")")
@@ -128,9 +136,6 @@ end
 if system.config.debug then
     if not user.getUser("debug") then
         user.create("debug", "debug", 100, 100)
-        local f = fs.open("/etc/sudoers", "a")
-        f:write("debug ALL=(root) ALL")
-        f:close()
     end
 end
 
@@ -207,6 +212,7 @@ local function runShutdownHooks()
                 if not pid or pid == -1 then
                     status(2, path .. ": " .. tostring(exec_err or "Unable to launch program"))
                 else
+                    ownGroup(pid)
                     local snapshot = process.get(pid)
                     instance = instance or (snapshot and snapshot.instance)
                     if service.oneshot then
@@ -284,6 +290,7 @@ while true do
             status(2, "Failed to start login: " .. tostring(err))
             retryAt = computer.uptime() + 1
         else
+            ownGroup(pid)
             local login = process.get(pid)
             loginPid, loginInstance = pid, login and login.instance
         end
