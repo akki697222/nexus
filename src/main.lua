@@ -371,5 +371,10 @@ end
 
 local s, e = xpcall(main, debug.traceback)
 if not s then
-    panic("not syncing", "Uncaught Error Occurred")
+    -- the error and where it came from, not just that something failed
+    local message = tostring(e)
+    for line in message:gmatch("[^\r\n]+") do
+        printk(line, "emerg")
+    end
+    panic("not syncing", "Uncaught Error Occurred: " .. (message:match("^[^\r\n]*") or "?"))
 end
