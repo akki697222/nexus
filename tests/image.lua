@@ -46,6 +46,7 @@ local function boot(files, options)
                 local g = options.gpu
                 g.calls[#g.calls + 1] = method
                 if method == "getResolution" then return g.w, g.h end
+                if method == "setResolution" then g.res = { a[1], a[2] } end
                 if method == "set" then g.rows[a[2]] = a[3] end
                 if method == "fill" and a[5] == " " then
                     for row = a[2], a[2] + a[4] - 1 do g.rows[row] = nil end
@@ -136,23 +137,23 @@ assert(calls == math.ceil(#stub / 1024), "one inflate per kernel block, got " ..
 
 -- 1b. With a GPU and screen, a progress bar is drawn per block, never from
 -- inside load(), and only when the bar changes.
+-- The boot screen is 50x16, which every GPU tier supports: the bar sits
+-- on row 9 and the title two rows above it.
 local gpu = { w = 80, h = 25, calls = {}, rows = {} }
 ok, err = boot({ ["/boot/nexusos"] = image }, { dataCard = true, gpu = gpu })
 assert(ok, err)
 assert(gpu.calls[1] == "bind")
-local bar = gpu.rows[13]
+assert(gpu.res and gpu.res[1] == 50 and gpu.res[2] == 16, "boot screen resolution")
+local bar = gpu.rows[9]
 assert(bar and bar:find("100%", 1, true) and not bar:find("\u{2591}"), tostring(bar))
-assert(gpu.rows[11]:find("Starting kernel", 1, true), tostring(gpu.rows[11]))
+assert(gpu.rows[7]:find("Starting kernel", 1, true), tostring(gpu.rows[7]))
 local sets = 0
 for _, m in ipairs(gpu.calls) do if m == "set" then sets = sets + 1 end end
 assert(sets <= calls + 4, "redraws only on change: " .. sets)
--- a tiny screen still fits the bar
-gpu = { w = 20, h = 5, calls = {}, rows = {} }
-ok, err = boot({ ["/boot/nexusos"] = image }, { dataCard = true, gpu = gpu })
-assert(ok, err)
+-- every row fits the 50 columns of the boot screen
 for _, row in pairs(gpu.rows) do
     local cells = select(2, row:gsub("[^\128-\191]", ""))
-    assert(cells <= 20, "row wider than the screen: " .. row)
+    assert(cells <= 50, "row wider than the screen: " .. row)
 end
 
 -- 2. Without a data card a compressed image is inflated in Lua, yielding

@@ -352,11 +352,12 @@ do
     local gpu, screen = component.list("gpu")(), component.list("screen")()
     if gpu and screen then
         invoke(gpu, "bind", screen)
-        local w, h = invoke(gpu, "getResolution")
+        local w, h = 50, 16
         local width = math.max(10, math.min(w - 8, 48))
         local x = math.floor((w - width - 5) / 2) + 1
         local y = math.floor(h / 2) + 1
         local shown = -1
+        invoke(gpu, "setResolution", w, h)
         invoke(gpu, "setForeground", 0xFFFFFF)
         invoke(gpu, "setBackground", 0x000000)
         invoke(gpu, "fill", 1, 1, w, h, " ")
