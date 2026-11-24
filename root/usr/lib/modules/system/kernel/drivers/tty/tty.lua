@@ -425,12 +425,11 @@ function tty_driver:push(token)
     process.wakeIO(self.channel)
 end
 
--- config.tty_debug: one debug line in dmesg per key signal and per token
--- a reader takes, with the uptime, for tracing input delays.
+-- Set by the debug module (development builds): called with a format and
+-- its values for each key signal and each token a reader takes.
+local traceHook
 local function trace(fmt, ...)
-    if system.config and system.config.tty_debug then
-        system.printk(string.format("tty: %.2f " .. fmt, computer.uptime(), ...), "debug")
-    end
+    if traceHook then traceHook(fmt, ...) end
 end
 
 -- A signal from the keyboard (kernel context).
@@ -839,6 +838,15 @@ function tty.getCurrent()
     local proc = process.getCurrent()
     local ttyid = proc and proc.tty or 0
     return tty.get(ttyid)
+end
+
+-- The hook runs in kernel context, so only the kernel itself (module
+-- loading) and root may set it.
+function tty.setTrace(fn)
+    local cur = process.getCurrent()
+    if cur and cur.euid ~= 0 then return nil, "Permission denied" end
+    traceHook = fn
+    return true
 end
 
 function tty.get(id)

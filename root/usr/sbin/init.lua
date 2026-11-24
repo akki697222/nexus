@@ -133,15 +133,6 @@ local function startRunlevel(runlevel)
     end
 end
 
-if system.config.debug then
-    if not user.getUser("debug") then
-        user.create("debug", "debug", 100, 100)
-        local f = fs.open("/etc/sudoers", "a")
-        f:write("debug ALL=(root) ALL")
-        f:close()
-    end
-end
-
 if fs.exists("/etc/profile.lua") then
     local s, e = pcall(dofile, "/etc/profile.lua")
     if not s then

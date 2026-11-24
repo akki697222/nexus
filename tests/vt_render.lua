@@ -117,12 +117,19 @@ function H.load(path, opts)
                    createKernelThread = function() end },
         computer = { uptime = function() return now end },
         event = { getForeground = function() return env.fg end },
-        process = { get = function(pid) if pid then return { instance = 1 } end end },
+        process = { get = function(pid) if pid then return { instance = 1 } end end,
+                    getCurrent = function() return nil end },
     }
     local sandbox = setmetatable({ require = function(n) return assert(modules[n], n) end }, { __index = _G })
     local chunk = assert(loadfile(path, "t", sandbox))
     local mod = chunk()
     local dev = mod.module.new(0)
+    -- the DEBUG label and the vt debug row come from the debug module
+    -- (development builds only: release branches drop it)
+    modules.module.require = function(name) return name == "vt" and mod.module or nil end
+    local debugChunk = loadfile("root/usr/lib/modules/system/kernel/debug.lua", "t", sandbox)
+    if debugChunk then debugChunk().load() end
+    H.hasDebug = debugChunk ~= nil
     return {
         dev = dev, calls = calls, screen = buffers[0], buffers = buffers,
         setTime = function(t) now = t end, env = env,
@@ -167,7 +174,7 @@ for _, size in ipairs({ { 80, 25 }, { 160, 50 } }) do
     assert(rowText(vt.screen, h):find("^user@nexus:~%$"), rowText(vt.screen, h))
     assert(vt.screen.cells[1][1][2] == ({ [1]=0xFF0000,[2]=0x00FF00,[3]=0xFFFF00,[4]=0x0000FF,[5]=0xFF00FF,[6]=0x00FFFF,[7]=0xFFFFFF })[first % 7 + 1],
         "colors must survive")
-    assert(rowText(vt.screen, h):sub(-5) == "DEBUG", "debug marker on the last row")
+    assert(not H.hasDebug or rowText(vt.screen, h):sub(-5) == "DEBUG", "debug marker on the last row")
 
     -- 2. Typing costs a handful of calls per key, not a screen redraw.
     local worst = 0
@@ -183,7 +190,8 @@ for _, size in ipairs({ { 80, 25 }, { 160, 50 } }) do
     dev:backspace(3)
     dev:update()
     assert(vt.total() <= 25)
-    assert(rowText(vt.screen, h):find("~%$ bcdefghijklmnopqrstuvwxyzab%s"), rowText(vt.screen, h))
+    local typed = rowText(vt.screen, h):gsub("%s*DEBUG$", ""):gsub("%s+$", "")
+    assert(typed:find("~%$ bcdefghijklmnopqrstuvwxyzab$"), rowText(vt.screen, h))
 
     -- 3. A new output line scrolls with a buffer copy, not a full redraw.
     vt.reset()

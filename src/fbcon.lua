@@ -121,12 +121,6 @@ print = function(...)
     write(str .. "\n")
 end
 
-printd = function(...)
-    if config.debug then
-        print(...)
-    end
-end
-
 -- Console log level (Linux console_loglevel): once init runs, only
 -- messages at least this severe reach the console; all of them go to klog
 -- (dmesg, syslogd). config.console_loglevel takes a level name or 0..7.

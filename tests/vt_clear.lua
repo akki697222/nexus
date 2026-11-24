@@ -72,14 +72,19 @@ local apis = {
     component = { list = function() return function() return "gpu" end end, proxy = function() return gpu end },
     computer = { uptime = function() return 0 end },
     event = { pull = coroutine.yield, setForeground = function() end, getForeground = function() return 2 end },
-    process = { get = function(pid) return pid == 2 and { instance = 1 } or nil end, getCurrentPID = function() return 2 end },
-    module = { require = function() return vt.module end },
-    -- debug draws a red DEBUG label in the bottom right corner
+    process = { get = function(pid) return pid == 2 and { instance = 1 } or nil end, getCurrentPID = function() return 2 end,
+                getCurrent = function() return nil end },
+    module = { require = function(name) return name == "vt" and vt.module or nil end },
+    -- the debug module draws a red DEBUG label in the bottom right corner
     system = { config = { debug = true }, createKernelThread = function(fn) vt.repaint = coroutine.create(fn) end },
 }
 local env = setmetatable({ require = function(name) return assert(apis[name], name) end }, { __index = _G })
 vt = assert(loadfile(driverPath .. "vt.lua", "t", env))()
 vt.load()
+-- development builds only: release branches drop the debug module
+local debugChunk = loadfile("root/usr/lib/modules/system/kernel/debug.lua", "t", env)
+local debugModule = debugChunk and debugChunk()
+if debugModule then debugModule.load() end
 local dev = vt.module.new(0)
 dev:setInputCursor(2)
 
@@ -139,5 +144,13 @@ dev:write("y"); paint()
 dev:write("z"); paint()
 assert(fileReads - before <= 1, "scrolled-back rows are cached: " .. (fileReads - before) .. " reads")
 assert(redCells() == 0, "red while scrolled back")
+
+-- The DEBUG label is the debug module's: unloading it leaves the corner blank.
+if debugModule then
+    debugModule.unload()
+    dev:write("w")
+    paint()
+    assert(row(H):sub(W - 4) ~= "DEBUG", "no label without the debug module")
+end
 
 print("vt clear tests passed")

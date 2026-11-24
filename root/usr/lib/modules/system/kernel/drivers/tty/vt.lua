@@ -15,6 +15,10 @@ local process = require("process")
 local vts = {}
 local CURSOR_HALF_PERIOD = 0.5
 
+-- Set by the debug module (development builds): draws over the off-screen
+-- buffer after the rows and returns the rows it drew over.
+local debugOverlay
+
 -- What the GPU is set to (foreground, background, active buffer), so calls
 -- that would not change anything are skipped: every GPU call counts
 -- against the machine's per-tick call budget. Only the console modules
@@ -701,9 +705,6 @@ function vt_driver:update()
 
     setActive(gpu, self.buf_n)
 
-    local debugRow = system.config.debug and height or nil
-    local vtDebugRow = system.config.console_vt_debug and 1 or nil
-
     -- Scrolled by a few rows: move what is already drawn instead of
     -- redrawing it. Logical line L sits on row L - start_line + 1.
     local drawn = self.drawn
@@ -776,10 +777,9 @@ function vt_driver:update()
         end
 
         local runs, sig = line_runs(line, width)
-        if sy == debugRow then sig = sig .. "\0DEBUG" end
-        if fullClear and sig == "" and sy ~= vtDebugRow then
+        if fullClear and sig == "" then
             drawn[sy] = sig -- already blank
-        elseif drawn[sy] ~= sig or sy == vtDebugRow then
+        elseif drawn[sy] ~= sig then
             if not fullClear then
                 -- only the part the runs leave uncovered needs clearing
                 local last = runs[#runs]
@@ -794,11 +794,6 @@ function vt_driver:update()
                 setBg(gpu, run[4])
                 gpu.set(run[1], sy, run[2])
             end
-            if sy == debugRow then
-                setFg(gpu, 0xFFFFFF)
-                setBg(gpu, 0xFF0000)
-                gpu.set(width - 4, height, "DEBUG")
-            end
             drawn[sy] = sig
             if not minRow or sy < minRow then minRow = sy end
             if not maxRow or sy > maxRow then maxRow = sy end
@@ -807,19 +802,16 @@ function vt_driver:update()
 
     if f then f:close() end
 
-    if vtDebugRow then
-        local vtbuf_size = 0
-        vtbuf_size = (fs.size and fs.size("/tmp/vtbuf")) or 0
-        local debug_str = string.format(
-            "CX:%d CY:%d W:%d H:%d BUF_N:%d LP:%d SCR:%d DIRTY:%s BUF:%d SIZE:%d",
-            self.cx, self.cy, width, height, (self.buf_n or -1), #self.line_positions,
-            self.scscroll, tostring(self.dirty), #self.buf, vtbuf_size
-        )
-
-        setFg(gpu, 0xFF0000)
-        setBg(gpu, 0x000000)
-        gpu.set(1, 1, debug_str)
-        drawn[1] = nil
+    if debugOverlay then
+        -- rows drawn over are redrawn from the buffer on the next pass
+        local rows = debugOverlay(self, gpu, setFg, setBg)
+        if rows then
+            for _, sy in ipairs(rows) do
+                drawn[sy] = nil
+                if not minRow or sy < minRow then minRow = sy end
+                if not maxRow or sy > maxRow then maxRow = sy end
+            end
+        end
     end
 
     self.drawn = drawn
@@ -935,6 +927,16 @@ function vt.new(id)
     devfs.create("ttyv" .. tostring(id), callbacks, false, 620)
     table.insert(vts, {dev = dev, id = id})
     return dev
+end
+
+-- The overlay runs in the kernel's repaint thread, so only the kernel
+-- itself (module loading) and root may set it.
+function vt.setDebugOverlay(fn)
+    local cur = process.getCurrent()
+    if cur and cur.euid ~= 0 then return nil, "Permission denied" end
+    debugOverlay = fn
+    for _, drv in ipairs(vts) do drv.dev:invalidate() end
+    return true
 end
 
 function vt.get(id)

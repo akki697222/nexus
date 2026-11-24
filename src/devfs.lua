@@ -102,7 +102,6 @@ end
 ---@param perm? integer
 ---@return boolean, string?, vnode?
 function devfs.create(name, ops, block, perm)
-    --printd("creating device " .. name .. " (block=" .. tostring(block) .. ")")
     if devices[name] then
         return false, "Device already exists"
     end

@@ -31,6 +31,8 @@ properties.includes = {
     "policy.lua",
     "devmgr.lua",
     "env.lua",
+    -- development builds only; release branches drop this line
+    "kdebug.lua",
     "main.lua",
 }
 properties.overwrite = true
