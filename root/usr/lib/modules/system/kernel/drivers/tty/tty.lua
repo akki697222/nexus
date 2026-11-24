@@ -47,7 +47,7 @@ function tty_driver:init()
     if not vt then
         local m, e = module.load("/usr/lib/modules/system/kernel/drivers/tty/vt.lua")
         if not m then
-            system.printk("tty: failed to create vt: cannot load module: " .. e)
+            system.printk("tty: failed to create vt: cannot load module: " .. e, "err")
             return
         end
         vt = m.module

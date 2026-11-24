@@ -732,7 +732,7 @@ function process.resume(proc, ev)
         -- process's possibly piped descriptors or suspended coroutine.
         local old_current = process.current
         process.current = -1
-        printk("Process " .. proc.pid .. " Exited on error: " .. tostring(ret))
+        printk("Process " .. proc.pid .. " Exited on error: " .. tostring(ret), "warning")
         process.current = old_current
         finish_process(proc, 1)
         return true

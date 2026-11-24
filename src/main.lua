@@ -84,7 +84,7 @@ local function main()
         printd("bootaddr: " .. boot)
         local s, e = vfs.mount(boot, "/")
         if not s then
-            printk("mount: " .. e)
+            printk("mount: " .. e, "err")
             panic("not syncing", "VFS: unable to mount root fs on " .. tostring(boot))
         end
         printk("VFS: Mounted root fs on device " .. tostring(boot) .. ".")
@@ -92,14 +92,14 @@ local function main()
     do
         local s, e = vfs.mount(computer.tmpAddress(), "/tmp")
         if not s then
-            printk("VFS: unable to mount tmp fs on " .. computer.tmpAddress())
+            printk("VFS: unable to mount tmp fs on " .. computer.tmpAddress(), "err")
         end
     end
     printk("tmpfs: mounted")
     do
         local s, e = vfs.mount(devfs, "/dev")
         if not s then
-            printk("mount: " .. e)
+            printk("mount: " .. e, "err")
             panic("not syncing", "devfs: unable to mount")
         end
     end
@@ -122,7 +122,7 @@ local function main()
         printk("imgfs: mounted " .. imagePath .. " on /usr (ro)")
         local seeded, se = imgfs.seedEtc(boot, imagePath)
         if not seeded then
-            printk("imgfs: unable to seed /etc: " .. tostring(se))
+            printk("imgfs: unable to seed /etc: " .. tostring(se), "err")
         end
     end
 
@@ -151,13 +151,19 @@ local function main()
     system.createKernelThread(function()
         local SAVE_INTERVAL = 1
         local last_save = computer.uptime()
+        local last_sync_error
         while true do
             if vfs._dirty and computer.uptime() - last_save >= SAVE_INTERVAL then
                 local ok, err = system._syncMetadata(function()
                     return vfs.saveMetadata(coroutine.yield)
                 end)
                 if not ok and err ~= "Metadata sync is stopping" then
-                    printk("vfs: metadata sync failed: " .. tostring(err))
+                    -- a failure repeats every interval; show it once
+                    local msg = "vfs: metadata sync failed: " .. tostring(err)
+                    printk(msg, msg == last_sync_error and "debug" or "err")
+                    last_sync_error = msg
+                elseif ok then
+                    last_sync_error = nil
                 end
                 last_save = computer.uptime()
             end
@@ -168,7 +174,7 @@ local function main()
     do
         local s, e = vfs.mount(procfs, "/proc")
         if not s then
-            printk("procfs: mount failed: " .. e)
+            printk("procfs: mount failed: " .. e, "err")
         end
     end
 
@@ -237,6 +243,8 @@ local function main()
         panic("not syncing", "No init found. Try passing init= option to kernel.")
     end
     printk("init: starting " .. init_path .. " (PID 1)")
+    -- from here on the console belongs to userland; see console_loglevel
+    fbcon.booted = true
     local pid, e = process.exec(init_path, { _OSVERSION }, 0, util.createEnv(), 1)
     if pid == -1 then
         panic("not syncing", "Failed to start init process: " .. e)
@@ -280,7 +288,7 @@ local function main()
             if coroutine.status(thr.co) ~= "dead" then
                 local s, e = coroutine.resume(thr.co, table.unpack(thr.args))
                 if not s then
-                    printk("kthread: " .. thr.name .. ": " .. e)
+                    printk("kthread: " .. thr.name .. ": " .. e, "err")
                 end
             else
                 table.insert(tremoves, i)

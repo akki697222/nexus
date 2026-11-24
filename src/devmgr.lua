@@ -63,8 +63,8 @@ local bindings = {}
 
 local ready = false
 
-local function log(msg)
-    printk("devmgr: " .. msg)
+local function log(msg, level)
+    printk("devmgr: " .. msg, level)
 end
 
 local function short(addr)
@@ -207,7 +207,7 @@ local function createGroup(name)
         if not group.getGroupByGID(gid) then
             local ok, e = group.create(name, gid)
             if ok == nil and e then
-                log("cannot create group '" .. name .. "': " .. tostring(e))
+                log("cannot create group '" .. name .. "': " .. tostring(e), "warning")
                 return nil
             end
             local g = group.getGroup(name)
@@ -225,7 +225,7 @@ local function allocNode(prefix, address, entry)
         if g then
             gid = g.gid
         else
-            log("cannot create group '" .. entry.group .. "' for " .. entry.name .. ", using root")
+            log("cannot create group '" .. entry.group .. "' for " .. entry.name .. ", using root", "warning")
         end
     end
     for i = 0, 255 do
@@ -267,7 +267,7 @@ local function teardown(b, state, reason)
     local slot = b.driver and loaded[b.driver]
     if slot and slot.drv.detach and b.inst ~= nil then
         local ok, e = xpcall(slot.drv.detach, debug.traceback, b.inst)
-        if not ok then log(b.driver .. ": detach failed: " .. tostring(e)) end
+        if not ok then log(b.driver .. ": detach failed: " .. tostring(e), "err") end
     end
     freeNode(b.node)
     local wasBound = b.state == "bound"
@@ -293,7 +293,7 @@ local function bindTo(address, ctype, entry)
     local drv, e = acquire(entry)
     if not drv then
         b.state, b.error = "failed", e
-        log(entry.name .. ": cannot load for " .. short(address) .. ": " .. tostring(e))
+        log(entry.name .. ": cannot load for " .. short(address) .. ": " .. tostring(e), "err")
         return nil, e
     end
     local proxy = component.proxy(address)
@@ -312,7 +312,7 @@ local function bindTo(address, ctype, entry)
         releaseCode(entry.name)
         b.state = "failed"
         b.error = ok and "attach returned nil" or tostring(inst)
-        log(entry.name .. ": attach failed for " .. short(address) .. ": " .. b.error)
+        log(entry.name .. ": attach failed for " .. short(address) .. ": " .. b.error, "warning")
         return nil, b.error
     end
     b.inst = inst
@@ -360,14 +360,14 @@ end
 -- Detach after a driver error; the component stays known as failed.
 local function fail(b, reason)
     if b.state ~= "bound" then return end
-    log((b.driver or "?") .. ": " .. short(b.address) .. " failed: " .. tostring(reason))
+    log((b.driver or "?") .. ": " .. short(b.address) .. " failed: " .. tostring(reason), "err")
     teardown(b, "failed", tostring(reason))
 end
 
 function devmgr.init()
     local ok, e = loadIndex()
     if not ok then
-        log("no driver index (" .. tostring(e) .. "); automatic driver loading disabled")
+        log("no driver index (" .. tostring(e) .. "); automatic driver loading disabled", "warning")
     else
         log(#index .. " driver(s) indexed")
     end

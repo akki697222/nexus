@@ -181,7 +181,7 @@ function user.create(username, password, uid, gid, gecos, shell)
             f:write("process.cwd(os.getenv(\"HOME\"))")
             f:close()
         else
-            printk("user: create: cannot open '" .. prof .. "': " .. e)
+            printk("user: create: cannot open '" .. prof .. "': " .. e, "err")
         end
         vfs.chown(prof, uid, gid)
     end
@@ -285,7 +285,7 @@ function user.init()
         if created then
             vfs.chmod("/root", 0700)
         else
-            printk("user: init: cannot create '/root': " .. tostring(err or "unknown error"))
+            printk("user: init: cannot create '/root': " .. tostring(err or "unknown error"), "err")
         end
     end
 end

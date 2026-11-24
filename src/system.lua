@@ -117,8 +117,10 @@ function system.finishShutdown()
     return true
 end
 
-function system.printk(...)
-    printk(...)
+---@param msg any
+---@param level? string
+function system.printk(msg, level)
+    printk(msg, level)
 end
 
 -- Adds a message to the system log (dmesg, syslogd). The sender's pid and

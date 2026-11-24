@@ -11,20 +11,20 @@ function module.autoload()
 
     local f, err = loadfile("/etc/modules.lua", "bt", util.createEnv())
     if not f then
-        printk("module: autoload: " .. (err or "no /etc/modules.lua found"))
+        printk("module: autoload: " .. (err or "no /etc/modules.lua found"), "warning")
         return
     end
 
     local s, modules = xpcall(f, debug.traceback)
     if not s or type(modules) ~= "table" then
-        printk("module: autoload: invalid format /etc/modules.lua")
+        printk("module: autoload: invalid format /etc/modules.lua", "err")
         return
     end
 
     for _, path in ipairs(modules) do
         local m, e = module.load(path)
         if not m then
-            printk("module: autoload: failed to load '" .. path .. "': " .. e)
+            printk("module: autoload: failed to load '" .. path .. "': " .. e, "err")
         end
     end
 end
@@ -94,8 +94,8 @@ function module.unload(name, privileged)
     if mod then
         local s, err = xpcall(mod.unload, debug.traceback)
         if not s then
-            printk("module: unsafe module unloading occurred on unloading module '" .. name .. "'")
-            printk("module: " .. err)
+            printk("module: unsafe module unloading occurred on unloading module '" .. name .. "'", "err")
+            printk("module: " .. err, "err")
             return "Unknown error"
         else
             kmodule_loaded[name] = nil

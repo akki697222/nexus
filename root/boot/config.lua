@@ -14,8 +14,11 @@ local config = {
     console_force_framebuffer = false;
     console_framebuffer_minimumres = false;
     console_vt_debug = false;
+    -- after boot, printk only reaches the console at this level or worse
+    -- (emerg alert crit err warning notice info debug, or 0..7); dmesg has all
+    console_loglevel = "err";
     -- Filesystem
     filesystem_read_bytes = math.huge;
 }
 
-return config
+return config

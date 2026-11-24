@@ -127,13 +127,31 @@ printd = function(...)
     end
 end
 
-printk = function(...)
-    local msg = tostring(... or "")
-    write(string.format("[%8.2f] %s\n", computer.uptime(), msg))
+-- Console log level (Linux console_loglevel): once init runs, only
+-- messages at least this severe reach the console; all of them go to klog
+-- (dmesg, syslogd). config.console_loglevel takes a level name or 0..7.
+fbcon.booted = false
+
+local function consoleLevel()
+    local v = config and config.console_loglevel
+    if type(v) == "number" then return v end
+    if klog and type(v) == "string" and klog.LEVELS[v] then return klog.LEVELS[v] end
+    return 3 -- err
+end
+
+---@param msg any
+---@param level? string emerg alert crit err warning notice info debug (default info)
+printk = function(msg, level)
+    msg = tostring(msg or "")
+    local levels = klog and klog.LEVELS
+    if not (levels and levels[level]) then level = "info" end
+    if not fbcon.booted or not levels or levels[level] <= consoleLevel() then
+        write(string.format("[%8.2f] %s\n", computer.uptime(), msg))
+    end
     if klog then
         -- printk from a process (system.printk) is attributed to it
         local pid = process and process.current and process.current > 0 and process.current or nil
-        klog.record("info", "kernel", msg, pid)
+        klog.record(level, "kernel", msg, pid)
     end
 end
 
@@ -154,15 +172,15 @@ panic = function(err, reason)
         end
     else
         local header = "Kernel panic - " .. err .. ": " .. reason
-        printk(header)
-        printk("PID: " .. tostring(process.current) .. " " .. _OSVERSIONSTRING)
-        printk("Hardware name: " .. _MACHINE)
-        printk("Call Trace:")
+        printk(header, "emerg")
+        printk("PID: " .. tostring(process.current) .. " " .. _OSVERSIONSTRING, "emerg")
+        printk("Hardware name: " .. _MACHINE, "emerg")
+        printk("Call Trace:", "emerg")
         local trace = debug.traceback("", 2)
         local first = true
         for line in string.gmatch(trace, "([^\r\n]+)") do
             if not first then
-                printk("  " .. string.match(line, "^%s*(.*)"))
+                printk("  " .. string.match(line, "^%s*(.*)"), "emerg")
             end
             first = false
         end
