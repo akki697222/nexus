@@ -215,6 +215,11 @@ local function main()
     user.init()
     group.init()
 
+    -- bind drivers to the devices present at boot; modules from
+    -- /etc/modules.lua are loaded by now, groups are known for /dev nodes
+    devmgr.init()
+    devmgr.coldplug()
+
     local init_path = nil
     if #kargs ~= 0 then
         for _, value in ipairs(kargs) do
@@ -291,6 +296,7 @@ local function main()
         local ev = table.pack(computer.pullSignal(0.05))
         if ev.n > 0 then
             device.handleEvent(ev[1], ev[2])
+            devmgr.handleEvent(ev[1], ev[2], ev[3])
             event.dispatch(ev)
         end
 

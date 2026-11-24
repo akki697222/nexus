@@ -29,6 +29,7 @@ properties.includes = {
     "os.lua",
     "system.lua",
     "policy.lua",
+    "devmgr.lua",
     "env.lua",
     "main.lua",
 }

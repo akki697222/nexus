@@ -531,6 +531,9 @@ function process.kill(pid)
     if proc.tid == proc.pid and proc.fd then
         vfsk.closeAllFds(proc.fd)
     end
+    if proc.tid == proc.pid and devmgr then
+        devmgr.reap(pid)
+    end
     process_map[pid] = nil
     used_pids[pid] = nil
     spawn_completions[proc.instance] = nil
