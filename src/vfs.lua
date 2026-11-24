@@ -167,9 +167,11 @@ local function ensureLoaded(dir)
         for _, name in ipairs(entries) do
             name = name:gsub("^/*", ""):gsub("/*$", "")
             if name ~= "" and name ~= ".meta" and not findChild(dir, name) then
-                local isDir = fs.isDirectory(vfs.concat(path, name))
-                local node = createVNode(name, isDir and "VDIR" or "VREG", dir, fs)
+                local linkTarget = fs.readlink and fs.readlink(vfs.concat(path, name))
+                local isDir = not linkTarget and fs.isDirectory(vfs.concat(path, name))
+                local node = createVNode(name, linkTarget and "VLNK" or (isDir and "VDIR" or "VREG"), dir, fs)
                 node.mtime, node.btime = nil, nil -- from the disk unless .meta says otherwise
+                if linkTarget then node.link = linkTarget; node.mode = 0777 end
                 if isDir then node.loaded = false end
             end
         end
@@ -409,13 +411,11 @@ function vfs.can(path, action)
 
     if proc.euid == 0 then return true end
 
-    -- ルートの実行権限確認
     local rootNode = vfsk.lookup("/")
     if not rootNode or not checkPerms(rootNode, proc, "x") then
         return false
     end
 
-    -- 各親ディレクトリの実行権限確認
     local parts     = vfs.segments(path)
     local checkPath = "/"
     for i = 1, #parts - 1 do
@@ -425,7 +425,6 @@ function vfs.can(path, action)
         if not checkPerms(node, proc, "x") then return false end
     end
 
-    -- ターゲット自身の権限確認
     local vnode = vfsk.lookup(path)
     if not vnode then return false end
     return checkPerms(vnode, proc, action)
@@ -499,19 +498,21 @@ function vfsk.lookup(path)
                 local fs_rel    = getFsRelativePath(current)
                 local check     = (fs_rel == "/" and "" or fs_rel) .. "/" .. name
                 if current.fs.exists(check) then
-                    local isDir = current.fs.isDirectory(check)
+                    -- a dynamic fs may expose symlinks (procfs: /proc/<pid>/fd/N)
+                    local linkTarget = current.fs.readlink and current.fs.readlink(check)
+                    local isDir = not linkTarget and current.fs.isDirectory(check)
                     next_node = {
                         name     = name,
                         hash     = name_hash,
-                        type     = isDir and "VDIR" or "VREG",
+                        type     = linkTarget and "VLNK" or (isDir and "VDIR" or "VREG"),
                         parent   = current,
                         children = {},
                         fs       = current.fs,
-                        link     = nil,
+                        link     = linkTarget,
                         mtime    = 0,
                         btime    = 0,
                         refcount = 1,
-                        mode     = isDir and 0555 or 0444,
+                        mode     = linkTarget and 0777 or (isDir and 0555 or 0444),
                         uid      = 0,
                         gid      = 0,
                         size     = 0,
@@ -971,7 +972,6 @@ end
 ---@param path string
 ---@return integer
 function vfs.size(path)
-    -- FIX: getFsRelativePath でFS相対パスを使う (旧: rest変数 = VFS相対パスで不正確)
     local vnode = vfsk.lookup(path)
     if vnode and vnode.fs then
         return vnode.fs.size(getFsRelativePath(vnode))
@@ -998,7 +998,6 @@ end
 ---@param path string
 ---@return integer
 function vfs.lastModified(path)
-    -- FIX: getFsRelativePath でFS相対パスを使う
     local vnode = vfsk.lookup(path)
     if vnode and vnode.fs then
         return vnode.fs.lastModified(getFsRelativePath(vnode))
@@ -1384,6 +1383,24 @@ function vfs.open(path, mode)
         "bad argument #2 (r[b], w[b] or a[b] expected, got " .. mode .. ")")
 
     local vnode, rest, mp = vfsk.lookup(path)
+    -- lookup() leaves a final symlink in place: open the file it points to
+    do
+        local hops = 0
+        while vnode and vnode.type == "VLNK" and vnode.link and hops < 16 do
+            local target = vnode.link
+            if type(target) == "string" then
+                if target:sub(1, 1) ~= "/" then
+                    target = vfs.concat(vfs.realPath(vnode.parent) or "/", target)
+                end
+            else
+                target = vfs.realPath(target)
+            end
+            vnode, rest, mp = vfsk.lookup(target)
+            hops = hops + 1
+        end
+        if hops > 0 and not vnode then return nil, "No such file or directory" end -- dangling link
+        if vnode and vnode.type == "VLNK" then return nil, "Too many levels of symbolic links" end
+    end
     local created
     if not vnode then
         if vfs.name(path) == ".meta" then return nil, "Reserved metadata name" end
@@ -1561,6 +1578,7 @@ function vfs.chown(path, uid, gid)
 end
 
 local function writeMeta(dirPath, children, fs)
+    if fs == devfs then return true end -- device nodes live in memory only
     if fs.isReadOnly and fs.isReadOnly() then return true end
 
     local meta = {}

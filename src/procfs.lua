@@ -83,22 +83,32 @@ local function proc_environ(pid)
     return table.concat(lines) .. "\n"
 end
 
-local function proc_fd_list(pid)
+-- /proc/<pid>/fd is a directory of symlinks, one per open descriptor, named by
+-- fd number. The console descriptors point at the process's tty node (like
+-- /dev/pts/N on Linux), others at the path of the file they refer to.
+local function proc_fd_numbers(pid)
     local proc = process.get(pid)
     if not proc then return nil end
-    local lines = {}
-    local slots = {}
-    for i in pairs(proc.fd or {}) do slots[#slots + 1] = i end
-    table.sort(slots)
-    for _, i in ipairs(slots) do
-        local desc = proc.fd[i]
-        local name = "?"
-        if desc.vnode then
-            name = vfs.realPath and vfs.realPath(desc.vnode) or (desc.vnode.name or "?")
-        end
-        table.insert(lines, string.format("%d -> %s (%s)\n", i - 1, name, desc.flag or "?"))
+    local nums = {}
+    for i in pairs(proc.fd or {}) do nums[#nums + 1] = i - 1 end
+    table.sort(nums)
+    return nums
+end
+
+local function proc_fd_target(pid, n)
+    local proc = process.get(pid)
+    if not proc or not n then return nil end
+    local desc = proc.fd and proc.fd[n + 1]
+    if not desc then return nil end
+    if desc == vhandles["0"] or desc == vhandles["1"] or desc == vhandles["2"] then
+        local ttyName = "tty" .. tostring(proc.tty or 0)
+        if devfs.exists("/" .. ttyName) then return "/dev/" .. ttyName end
+        return "/dev/console"
     end
-    return table.concat(lines)
+    if desc.vnode then
+        return vfs.realPath(desc.vnode) or ("anon_inode:" .. tostring(desc.vnode.name or "?"))
+    end
+    return "anon_inode:[" .. tostring(desc.flag or "?") .. "]"
 end
 
 local function parse_path(path)
@@ -131,7 +141,6 @@ local function get_content(path)
         if sub == "/status"  then return proc_status(pid)  end
         if sub == "/cmdline" then return proc_cmdline(pid) end
         if sub == "/environ" then return proc_environ(pid) end
-        if sub == "/fd"      then return proc_fd_list(pid) end
         return nil
     end
 
@@ -156,7 +165,9 @@ function procfs.exists(path)
         if sub == nil then return true end
         local valid = { ["/status"]=true, ["/cmdline"]=true,
                         ["/environ"]=true, ["/fd"]=true }
-        return valid[sub] == true
+        if valid[sub] == true then return true end
+        local n = sub:match("^/fd/(%d+)$")
+        return n ~= nil and proc_fd_target(pid, tonumber(n)) ~= nil
     end
     if sub then
         return virtual_files[sub] ~= nil
@@ -168,8 +179,18 @@ function procfs.isDirectory(path)
     if path == "/" or path == "" or path == "." then return true end
 
     local pid, sub = parse_path(path)
-    if pid and sub == nil then return true end
+    if pid and (sub == nil or sub == "/fd") then return true end
     return false
+end
+
+---@param path string
+---@return string|nil target
+function procfs.readlink(path)
+    local pid, sub = parse_path(path)
+    if not pid or not sub then return nil end
+    local n = sub:match("^/fd/(%d+)$")
+    if not n then return nil end
+    return proc_fd_target(pid, tonumber(n))
 end
 
 function procfs.list(path)
@@ -187,8 +208,14 @@ function procfs.list(path)
         return result
     end
 
-    local pid = parse_path(path)
+    local pid, sub = parse_path(path)
     if pid and process.get(pid) then
+        if sub == "/fd" then
+            local out = {}
+            for _, n in ipairs(proc_fd_numbers(pid) or {}) do out[#out + 1] = tostring(n) end
+            return out
+        end
+        if sub ~= nil then return nil end
         return { "status", "cmdline", "environ", "fd" }
     end
 
