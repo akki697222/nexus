@@ -301,18 +301,23 @@ local function main()
 
     -- kernel main event loop
     while true do
-        local ev = table.pack(computer.pullSignal(0.05))
+        -- Block for the next signal only when no process is ready to run;
+        -- otherwise a process that yields would wait a whole tick each time.
+        local ev = table.pack(computer.pullSignal(#process.getRunQueue() > 0 and 0 or 0.05))
         if ev.n > 0 then
             device.handleEvent(ev[1], ev[2])
             devmgr.handleEvent(ev[1], ev[2], ev[3])
             event.dispatch(ev)
         end
 
-        resumeKernelThreads()
-
         process.dispatchWaiting(ev)
 
         runProcessQueue(ev)
+
+        -- Kernel threads (the vt repaint among them) run after the
+        -- processes, so what a process wrote for this key press reaches the
+        -- screen in the same pass instead of one tick later.
+        resumeKernelThreads()
 
         if not process.get(1) then
             panic("not syncing", "Attempted to kill init!")
