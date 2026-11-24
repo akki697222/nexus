@@ -1,0 +1,5 @@
+#!/sbin/openoc-run
+description="Startup Sound"
+command=/usr/bin/startupsound.lua
+command_args="/usr/share/boot.dfpwm"
+type=oneshot
