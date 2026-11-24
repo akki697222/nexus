@@ -178,8 +178,8 @@ if deployToOC then
     end
 end
 
--- Boot images for the Ocelot test disks: a zlib image (needs a data card)
--- and a store image. Only /boot/nexusos and /init.lua are replaced; the
+-- Boot images for the Ocelot test disks: a zlib image (inflated by a data
+-- card, or in Lua without one) and a store image. Only /boot/nexusos and /init.lua are replaced; the
 -- rest of each disk (/etc, /home, ...) and an existing /boot/config.lua
 -- are left alone. Skip with `lua build.lua noimage`.
 local IMAGE_TARGETS = {

@@ -93,7 +93,8 @@ local function boot(files, options)
             end
         end,
     }
-    local computer = { getBootAddress = function() return "boot" end }
+    local computer = { getBootAddress = function() return "boot" end,
+        pullSignal = function() options.yields = (options.yields or 0) + 1 end }
     -- OC's component.invoke may yield (call budget); yielding inside the
     -- load() reader fails, so any invoke during load() is an error here.
     local loading = false
@@ -154,9 +155,60 @@ for _, row in pairs(gpu.rows) do
     assert(cells <= 20, "row wider than the screen: " .. row)
 end
 
--- 2. Compressed image without a data card is refused with a clear message.
-ok, err = boot({ ["/boot/nexusos"] = image }, { dataCard = false })
-assert(not ok and tostring(err):find("needs a data card", 1, true), err)
+-- 2. Without a data card a compressed image is inflated in Lua, yielding
+-- between blocks, and the inflater is handed to the kernel.
+local info0 = nximg.parseHeader(image)
+local noCard = { dataCard = false }
+ok, err, env, calls = boot({ ["/boot/nexusos"] = image }, noCard)
+assert(ok, err)
+assert(calls == 0 and env.KERNEL_ARGS[1] == "init=/usr/sbin/init.lua")
+assert(noCard.yields == math.ceil(#stub / 1024), "one yield per block, got " .. tostring(noCard.yields))
+local soft = assert(env.NEXUS_INFLATE, "loader passes its inflater to the kernel")
+
+-- 2b. The Lua inflater against LibDeflate at every level (stored, fixed
+-- and dynamic blocks) and against real zlib output.
+local function pseudo(n, seed)
+    local t, x = {}, seed
+    for i = 1, n do
+        x = (x * 1103515245 + 12345) % 2147483648
+        t[i] = string.char(x % 256)
+    end
+    return table.concat(t)
+end
+local text = {}
+for i = 0, 3999 do text[#text + 1] = string.char(32 + (i * 7 + (i // 13) * 3) % 90) end
+text = table.concat(text) .. string.rep("the quick brown fox ", 50)
+local samples = { "", "a", "hello hello hello hello world", pseudo(3000, 7), text,
+    string.rep("x", 16384), init_source:sub(1, 16384),
+    pseudo(26000, 3) .. pseudo(26000, 3):sub(1, 3000) } -- distances past 24576
+for _, sample in ipairs(samples) do
+    for level = 0, 9 do
+        local z = libdeflate:CompressZlib(sample, { level = level })
+        assert(soft(z) == sample, "level " .. level .. ", " .. #sample .. " bytes")
+    end
+end
+local function unhex(h) return (h:gsub("..", function(c) return string.char(tonumber(c, 16)) end)) end
+assert(soft(unhex("78012bc9ccab542849ad280100124003aa")) == "tiny text")
+assert(soft(unhex("78daed925b5741611445ffcaa7120a118aa20845288aa228b7c3396ec735fcfbbefdb2c77aefadb15fd7c31c6bcc3195cb1f89a71f2bf5efc1747d747a1e4b3e3cd59abdd162e73ebb48640a2f8df670b639f086ae52b9e7b7567fbcdc1f072e6fb2c5d78f8e69ff1c9e84afeff2e5f72f63b2522e7ff4f6be54fdec5af3ad4631d6a1518c756a14633d1ac5589f463136a8518ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca5878ca587e0d3e1069f4e2ff8f404c0a72f0c3e8351f0198983cf58127c2632e03395039fd922f8cc97c167a90a3e2b75f0596b82cf461b7cb6fae0b363824f63023eadb99290242409494292902424094942929024240949429290fe12d2da34d46263f5c6aabbb4b73335b0774a36d964fb5fdb2f25b61935")) == text, "zlib -9")
+assert(soft(unhex("7801ed97c952c24010865f65109020010204088b80a8b8e38afb0a8220124c4c20bcbdd53393ae397ab6fa9ac357ffd7dd99e961894cb1be7d787efb329a79b154bed2daebf61e079f4ea0654b9b3b471777af1fb6bfa617aa5bfba7d74fef5377b56e941bbbc797f76fe3f922ba61d6da076737cfc3af1f96c858cdcec9d5437ff2bd8ca5f2888d68d91262e37aa18ad8a4516e20366dd6da88cd59cd0e6221216221214f0b5848c8d3021612f2b48085843c2d6021214f0b5848c8d386e23c6d288e5810472c882316c4110be2880571c4cebc8886582788eb4a3d938652cfb4a9d4336729f52cd6957a565ab24d425cb64988cb360971d926212edb24c4659b84b86c9310e769c38ef3b461c76d5f1177578af822aa88331a241aa46e8f06894e247e74d08944571b5c1674b5d18e443b92d88a6947a21d8976247ab5c163109e577fd891bcf19039fe6430657d77beb4d9681e30fa4635a039f85fffc22f25b61935")) == text, "zlib -1")
+
+-- corrupt input is rejected, never returned
+local good = libdeflate:CompressZlib(text, { level = 6 })
+local function rejects(z, what)
+    local okz, e = pcall(soft, z)
+    assert(not okz, what .. " was accepted")
+    return e
+end
+assert(rejects(good:sub(1, -2), "short trailer"):find("adler32", 1, true))
+assert(rejects(good:sub(1, -5) .. "\0\0\0\0", "bad adler"):find("adler32", 1, true))
+rejects(good:sub(1, 20), "truncated stream")
+rejects("\120\2" .. good:sub(3), "bad header")
+rejects(good:sub(1, 2) .. "\255" .. good:sub(4), "bad block type")
+
+-- a corrupt block fails the boot with the loader's message
+ok, err = boot({ ["/boot/nexusos"] = image:sub(1, info0.dataOffset + 30) .. "\255\255"
+    .. image:sub(info0.dataOffset + 33) }, { dataCard = false })
+assert(not ok and tostring(err):find("^nexusos: inflate failed"), tostring(err))
 
 -- 3. Store image boots without a data card.
 local store = make_image(stub, { compression = nximg.COMP_STORE })

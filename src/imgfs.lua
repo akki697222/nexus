@@ -4,7 +4,8 @@
 --
 -- Mode, owner and group come from the image TOC and are exposed to the VFS
 -- as a synthesized .meta per directory, so they cannot be changed on disk.
--- Data is inflated per block (data card for zlib images) through a small
+-- Data is inflated per block (data card for zlib images, or the loader's
+-- Lua inflater without one) through a small
 -- block cache; the TOC is the only per-file state kept in memory.
 
 ---@class imgfs
@@ -14,6 +15,11 @@ imgfs.SECTION = { kernel = 1, usr = 2, etc = 3 }
 imgfs.CACHE_BLOCKS = 2
 
 local META = ".meta"
+
+-- The image loader (/init.lua) leaves its Lua inflater here for machines
+-- without a data card; take it out of the global table.
+local softInflate = NEXUS_INFLATE
+NEXUS_INFLATE = nil
 
 local function normalize(path)
     path = tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("^/", ""):gsub("/$", "")
@@ -66,12 +72,21 @@ function imgfs.open(address, imagePath, sectionType)
         local inflate
         if compression == 1 then
             local card = component.list("data")()
-            if not card then error("compressed image needs a data card", 0) end
-            local data = component.proxy(card)
-            inflate = function(stored)
-                local raw, err = data.inflate(stored)
-                if not raw then error("imgfs: inflate failed: " .. tostring(err), 0) end
-                return raw
+            if card then
+                local data = component.proxy(card)
+                inflate = function(stored)
+                    local raw, err = data.inflate(stored)
+                    if not raw then error("imgfs: inflate failed: " .. tostring(err), 0) end
+                    return raw
+                end
+            elseif softInflate then
+                inflate = function(stored)
+                    local okInflate, raw = pcall(softInflate, stored)
+                    if not okInflate then error("imgfs: inflate failed: " .. tostring(raw), 0) end
+                    return raw
+                end
+            else
+                error("compressed image needs a data card", 0)
             end
         elseif compression ~= 0 then
             error("unknown compression " .. compression, 0)

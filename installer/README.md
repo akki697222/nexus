@@ -11,7 +11,8 @@ spirit of a vmlinuz with an embedded rootfs:
 
 Blocks hold 16 KiB of uncompressed data each and, in compressed images, are
 standalone zlib streams that an OpenComputers data card inflates directly
-(`data.inflate`). Modes and owners of `/usr` come from the image, so they
+(`data.inflate`). Without a data card, `/init.lua` inflates them in Lua and
+hands the same inflater to the kernel for `/usr`. Modes and owners of `/usr` come from the image, so they
 cannot be changed on disk (including the set-user-ID bit of `sudo`).
 
 ## Building
@@ -20,7 +21,7 @@ From the repository root (Lua 5.3+):
 
 ```sh
 lua tools/nximg.lua dist build           # build/nexusos, build/init.lua, build/config.lua
-lua tools/nximg.lua dist build --store   # uncompressed image, no data card needed
+lua tools/nximg.lua dist build --store   # uncompressed image (about 4x larger)
 lua tools/nximg.lua info build/nexusos [usr|etc]
 lua tools/nximg.lua verify build/nexusos
 ```
@@ -50,7 +51,9 @@ boot disk is refused unless `--force` is passed.
 
 ## Requirements
 
-- Compressed images need a data card (tier 1 or higher) on the installed
-  machine; `--store` images (about 4x larger) boot without one.
+- Compressed images boot faster with a data card (tier 1 or higher), which
+  inflates blocks natively; without one they are inflated in Lua, which is
+  slower and uses more CPU time on every `/usr` read. `--store` images
+  (about 4x larger) need no inflating at all.
 - Development setups keep booting `root/init.lua`, which loads a plain
   `/boot/kernel.lua` and uses the on-disk `/usr`.

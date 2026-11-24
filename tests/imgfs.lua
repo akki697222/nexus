@@ -296,6 +296,26 @@ assert(fsA.content("/etc/sudoers") == "edited", "existing files are never overwr
 haveDataCard = false
 local none, noneErr = imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr)
 assert(not none and noneErr:find("data card", 1, true))
+-- with the loader's Lua inflater, no data card is needed
+local softCalls = 0
+NEXUS_INFLATE = function(z) softCalls = softCalls + 1; return LD:DecompressZlib(z) end
+assert(load(imgfsSource, "src/imgfs.lua"))()
+assert(NEXUS_INFLATE == nil, "imgfs takes the inflater out of the global table")
+local softUsr = assert(imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr))
+local sh = assert(softUsr.open("/lib/big.txt", "rb"))
+local got = {}
+while true do
+    local chunk = softUsr.read(sh, math.huge)
+    if not chunk then break end
+    got[#got + 1] = chunk
+end
+softUsr.close(sh)
+assert(table.concat(got) == big and softCalls > 0)
+NEXUS_INFLATE = function() error("bad data") end
+assert(load(imgfsSource, "src/imgfs.lua"))()
+local badUsr, badErr = imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr)
+assert(not badUsr and tostring(badErr):find("imgfs: inflate failed", 1, true), tostring(badErr))
+
 haveDataCard = true
 none, noneErr = imgfs.open("disk-a", "/boot/missing", imgfs.SECTION.usr)
 assert(not none and noneErr:find("cannot open", 1, true))
