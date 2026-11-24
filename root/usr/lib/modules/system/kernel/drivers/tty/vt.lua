@@ -15,6 +15,52 @@ local process = require("process")
 local vts = {}
 local CURSOR_HALF_PERIOD = 0.5
 
+-- What the GPU is set to (foreground, background, active buffer), so calls
+-- that would not change anything are skipped: every GPU call counts
+-- against the machine's per-tick call budget. Only the console modules
+-- change GPU state (userland may only query it, see policy.lua), and vts
+-- sharing a GPU share its record.
+local gpuStates = setmetatable({}, { __mode = "k" })
+
+local function gpuState(gpu)
+    local st = gpuStates[gpu]
+    if not st then
+        st = {}
+        gpuStates[gpu] = st
+    end
+    return st
+end
+
+local function setFg(gpu, color)
+    local st = gpuState(gpu)
+    if st.fg ~= color then
+        gpu.setForeground(color)
+        st.fg = color
+    end
+end
+
+local function setBg(gpu, color)
+    local st = gpuState(gpu)
+    if st.bg ~= color then
+        gpu.setBackground(color)
+        st.bg = color
+    end
+end
+
+local function setActive(gpu, n)
+    if not gpu.setActiveBuffer then return end
+    local st = gpuState(gpu)
+    if st.active ~= n then
+        gpu.setActiveBuffer(n)
+        st.active = n
+    end
+end
+
+-- after freeAllBuffers / allocateBuffer the GPU draws on the screen again
+local function forgetGpuState(gpu)
+    gpuStates[gpu] = { active = 0 }
+end
+
 local ansi_colors = {
     ["30"] = 0x000000,
     ["31"] = 0xFF0000,
@@ -186,14 +232,16 @@ function vt_driver:init()
 
     gpu.freeAllBuffers()
     self.buf_n = gpu.allocateBuffer()
+    forgetGpuState(gpu)
 
     self.width, self.height = gpu.maxResolution()
 
     gpu.setResolution(self.width, self.height)
     gpu.setViewport(self.width, self.height)
 
-    gpu.setForeground(0xFFFFFF)
-    gpu.setBackground(0x000000)
+    setActive(gpu, 0)
+    setFg(gpu, 0xFFFFFF)
+    setBg(gpu, 0x000000)
     gpu.fill(1, 1, self.width, self.height, " ")
     self:invalidate()
 end
@@ -211,14 +259,16 @@ function vt_driver:reset()
 
     gpu.freeAllBuffers()
     self.buf_n = gpu.allocateBuffer()
+    forgetGpuState(gpu)
 
     self.width, self.height = gpu.maxResolution()
 
     gpu.setResolution(self.width, self.height)
     gpu.setViewport(self.width, self.height)
 
-    gpu.setForeground(0xFFFFFF)
-    gpu.setBackground(0x000000)
+    setActive(gpu, 0)
+    setFg(gpu, 0xFFFFFF)
+    setBg(gpu, 0x000000)
     gpu.fill(1, 1, self.width, self.height, " ")
 end
 
@@ -232,8 +282,9 @@ function vt_driver:clear()
     self:invalidate()
     self.cursorOverlay = nil
 
-    gpu.setForeground(0xFFFFFF)
-    gpu.setBackground(0x000000)
+    setActive(gpu, 0)
+    setFg(gpu, 0xFFFFFF)
+    setBg(gpu, 0x000000)
     gpu.fill(1, 1, self.width, self.height, " ")
 end
 
@@ -465,8 +516,7 @@ function vt_driver:updateCursor()
     end
     if not x then return end
 
-    local activeBuffer = gpu.getActiveBuffer()
-    if activeBuffer ~= 0 then gpu.setActiveBuffer(0) end
+    setActive(gpu, 0)
     -- block cursor: the character under it in inverted colors
     local line = self.buf[self.cy]
     local ch = line and line.text:sub(self.cx, self.cx) or ""
@@ -474,13 +524,9 @@ function vt_driver:updateCursor()
     local cellFg = line and line.fg[self.cx] or self.fg
     local cellBg = line and line.bg[self.cx] or 0x000000
     if ch == " " then cellFg = self.fg end
-    local background, palette = gpu.getBackground()
-    local foreground = gpu.setForeground(cellBg)
-    gpu.setBackground(cellFg)
+    setFg(gpu, cellBg)
+    setBg(gpu, cellFg)
     gpu.set(x, y, ch)
-    gpu.setBackground(background, palette)
-    if foreground then gpu.setForeground(foreground) end
-    if activeBuffer ~= 0 then gpu.setActiveBuffer(activeBuffer) end
     self.cursorOverlay = { x = x, y = y }
 end
 
@@ -566,11 +612,7 @@ function vt_driver:update()
     local start_line = math.max(1, total_lines - height + 1 - self.scscroll)
     self.screenStart = start_line
 
-    local old_buf_n = nil
-    if gpu.getActiveBuffer and gpu.setActiveBuffer then
-        old_buf_n = gpu.getActiveBuffer()
-        gpu.setActiveBuffer(self.buf_n)
-    end
+    setActive(gpu, self.buf_n)
 
     local debugRow = system.config.debug and height or nil
     local vtDebugRow = system.config.console_vt_debug and 1 or nil
@@ -597,15 +639,13 @@ function vt_driver:update()
             drawn = nil
         end
     end
-    local current_fg, current_bg = -1, -1
     local fullClear = false
     if not drawn then
         -- Nothing reusable: clear once instead of row by row.
         drawn = {}
         self.minDirtyRow, self.maxDirtyRow = 1, height
-        current_fg, current_bg = 0xFFFFFF, 0x000000
-        gpu.setForeground(current_fg)
-        gpu.setBackground(current_bg)
+        setFg(gpu, 0xFFFFFF)
+        setBg(gpu, 0x000000)
         gpu.fill(1, 1, width, height, " ")
         fullClear = true
     end
@@ -640,31 +680,22 @@ function vt_driver:update()
             drawn[sy] = sig -- already blank
         elseif drawn[sy] ~= sig or sy == vtDebugRow then
             if not fullClear then
-                if current_fg ~= 0xFFFFFF then
-                    current_fg = 0xFFFFFF
-                    gpu.setForeground(current_fg)
+                -- only the part the runs leave uncovered needs clearing
+                local last = runs[#runs]
+                local covered = last and (last[1] + #last[2] - 1) or 0
+                if covered < width then
+                    setBg(gpu, 0x000000)
+                    gpu.fill(covered + 1, sy, width - covered, 1, " ")
                 end
-                if current_bg ~= 0x000000 then
-                    current_bg = 0x000000
-                    gpu.setBackground(current_bg)
-                end
-                gpu.fill(1, sy, width, 1, " ")
             end
             for _, run in ipairs(runs) do
-                if current_fg ~= run[3] then
-                    current_fg = run[3]
-                    gpu.setForeground(current_fg)
-                end
-                if current_bg ~= run[4] then
-                    current_bg = run[4]
-                    gpu.setBackground(current_bg)
-                end
+                setFg(gpu, run[3])
+                setBg(gpu, run[4])
                 gpu.set(run[1], sy, run[2])
             end
             if sy == debugRow then
-                current_fg, current_bg = 0xFFFFFF, 0xFF0000
-                gpu.setForeground(current_fg)
-                gpu.setBackground(current_bg)
+                setFg(gpu, 0xFFFFFF)
+                setBg(gpu, 0xFF0000)
                 gpu.set(width - 4, height, "DEBUG")
             end
             drawn[sy] = sig
@@ -684,8 +715,8 @@ function vt_driver:update()
             self.scscroll, tostring(self.dirty), #self.buf, vtbuf_size
         )
 
-        gpu.setForeground(0xFF0000)
-        gpu.setBackground(0x000000)
+        setFg(gpu, 0xFF0000)
+        setBg(gpu, 0x000000)
         gpu.set(1, 1, debug_str)
         drawn[1] = nil
     end
@@ -701,9 +732,7 @@ function vt_driver:update()
             self.cursorOverlay = nil
         end
     end
-    if gpu.setActiveBuffer then
-        gpu.setActiveBuffer(old_buf_n)
-    end
+    setActive(gpu, 0)
 
     self.dirty = false
     self.updating = false
