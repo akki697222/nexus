@@ -42,10 +42,12 @@ end
 expand_properties(props)
 
 local deployToOC = false
+local deployImages = true
 for i = 1, #arg do
     if arg[i] == "oc" then
         deployToOC = true
-        break
+    elseif arg[i] == "noimage" then
+        deployImages = false
     end
 end
 
@@ -173,6 +175,44 @@ if deployToOC then
         print("Warning: Failed to sync root to OC save directory.")
     else
         print("OC save directory sync complete.")
+    end
+end
+
+-- Boot images for the Ocelot test disks: a zlib image (needs a data card)
+-- and a store image. Only /boot/nexusos and /init.lua are replaced; the
+-- rest of each disk (/etc, /home, ...) and an existing /boot/config.lua
+-- are left alone. Skip with `lua build.lua noimage`.
+local IMAGE_TARGETS = {
+    { dir = "../ocelot/nexusos-zlib", options = {} },
+    { dir = "../ocelot/nexusos-store", options = { "--store" } },
+}
+
+local function exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() return true end
+    return false
+end
+
+if deployImages then
+    local nximg = assert(loadfile("tools/nximg.lua"))()
+    for _, target in ipairs(IMAGE_TARGETS) do
+        local winDir = target.dir:gsub("/", "\\")
+        os.execute("if not exist \"" .. winDir .. "\\boot\" mkdir \"" .. winDir .. "\\boot\"")
+        local out = target.dir .. "/boot/nexusos"
+        local args = { "build", out, "--kernel", outputFile }
+        for _, o in ipairs(target.options) do args[#args + 1] = o end
+        print("Image: " .. out)
+        local ok, err = pcall(nximg.run, args)
+        if not ok then
+            error("Failed to build " .. out .. ": " .. tostring(err))
+        end
+        local copied, copyErr = copyFile("bootstrap/init.lua", target.dir .. "/init.lua")
+        if not copied then
+            print("Warning: Failed to copy init.lua to " .. target.dir .. ": " .. (copyErr or ""))
+        end
+        if not exists(target.dir .. "/boot/config.lua") then
+            copyFile("root/boot/config.lua", target.dir .. "/boot/config.lua")
+        end
     end
 end
 

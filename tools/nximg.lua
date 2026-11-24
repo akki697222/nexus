@@ -470,6 +470,14 @@ end
 local commands = { build = cmd_build, info = cmd_info, verify = cmd_verify, extract = cmd_extract,
     dist = cmd_dist }
 
+-- For build.lua: run a subcommand with an argv-style table, e.g.
+-- nximg.run({ "build", "out/nexusos", "--store" }). Errors are raised.
+function nximg.run(args)
+    local command = commands[args[1] or ""]
+    if not command then error("unknown command " .. tostring(args[1]), 0) end
+    return command(args)
+end
+
 -- Run as a script only when this file is the program (not when loaded by a test).
 if arg and arg[0] and arg[0]:match("nximg%.lua$") then
     local command = commands[arg[1] or ""]
