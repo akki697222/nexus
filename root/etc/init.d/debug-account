@@ -1,4 +1,0 @@
-#!/sbin/openoc-run
-description="Debug account (development builds)"
-command=/usr/sbin/debug-account.lua
-type=oneshot

@@ -20,7 +20,7 @@ parser:flag("-o --operating-system", "print the operating system"):target("o")
 
 local opts = textio.parse("uname", parser, { ... })
 
--- _OSVERSION looks like "Nexus 0.0.6-dev-oc"
+-- _OSVERSION looks like "Nexus 0.0.6-oc"
 local name, release = tostring(_OSVERSION or "Nexus"):match("^(%S+)%s+(.+)$")
 name = name or tostring(_OSVERSION or "Nexus")
 release = release or "unknown"
