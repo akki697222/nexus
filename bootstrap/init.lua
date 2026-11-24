@@ -132,6 +132,40 @@ elseif compression ~= 0 then
     fail("unknown compression " .. compression)
 end
 
+-- Boot screen: a progress bar while the kernel blocks are read. Nothing is
+-- drawn without a GPU and a screen. The kernel clears the screen when its
+-- console starts.
+local progress
+do
+    local gpu, screen = component.list("gpu")(), component.list("screen")()
+    if gpu and screen then
+        invoke(gpu, "bind", screen)
+        local w, h = invoke(gpu, "getResolution")
+        local width = math.max(10, math.min(w - 8, 48))
+        local x = math.floor((w - width - 5) / 2) + 1
+        local y = math.floor(h / 2) + 1
+        local shown = -1
+        invoke(gpu, "setForeground", 0xFFFFFF)
+        invoke(gpu, "setBackground", 0x000000)
+        invoke(gpu, "fill", 1, 1, w, h, " ")
+        progress = {}
+        function progress.title(text)
+            text = text:sub(1, w)
+            invoke(gpu, "fill", 1, y - 2, w, 1, " ")
+            invoke(gpu, "set", math.max(1, math.floor((w - #text) / 2) + 1), y - 2, text)
+        end
+        function progress.set(fraction)
+            local filled = math.floor(fraction * width + 0.5)
+            if filled == shown then return end
+            shown = filled
+            invoke(gpu, "set", x, y, string.rep("\u{2588}", filled) .. string.rep("\u{2591}", width - filled)
+                .. string.format(" %3d%%", math.floor(fraction * 100 + 0.5)))
+        end
+        progress.title("Loading " .. IMAGE)
+        progress.set(0)
+    end
+end
+
 -- Read and inflate every kernel block first, then hand the pieces to
 -- load(). The reader must not touch components: load() calls it from C,
 -- and component.invoke may yield once the per-tick call budget is spent
@@ -155,6 +189,9 @@ for i = kernel.firstBlock, lastBlock do
         crc = crc32(raw, crc)
     end
     pieces[#pieces + 1] = raw
+    if progress then
+        progress.set((i - kernel.firstBlock + 1) / kernel.blockCount)
+    end
 end
 invoke(bootAddress, "close", handle)
 if total ~= kernel.rawSize then
@@ -164,6 +201,9 @@ if not inflate and crc ~= kernel.crc then
     fail("kernel checksum mismatch")
 end
 meta = nil
+if progress then
+    progress.title("Starting kernel...")
+end
 
 local nextPiece = 0
 local chunk, loadErr = load(function()

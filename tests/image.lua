@@ -42,6 +42,16 @@ local function boot(files, options)
     local component = {
         invoke = function(address, method, ...)
             local a = { ... }
+            if address == "gpu" then
+                local g = options.gpu
+                g.calls[#g.calls + 1] = method
+                if method == "getResolution" then return g.w, g.h end
+                if method == "set" then g.rows[a[2]] = a[3] end
+                if method == "fill" and a[5] == " " then
+                    for row = a[2], a[2] + a[4] - 1 do g.rows[row] = nil end
+                end
+                return true
+            end
             if address == "data" then
                 assert(method == "inflate")
                 inflate_calls = inflate_calls + 1
@@ -72,12 +82,14 @@ local function boot(files, options)
             error("unexpected method " .. method)
         end,
         list = function(kind)
-            assert(kind == "data")
-            local done = not options.dataCard
+            local present = (kind == "data" and options.dataCard)
+                or ((kind == "gpu" or kind == "screen") and options.gpu)
+            assert(kind == "data" or kind == "gpu" or kind == "screen", kind)
+            local done = not present
             return function()
                 if done then return nil end
                 done = true
-                return "data"
+                return kind
             end
         end,
     }
@@ -120,6 +132,27 @@ assert(env.KERNEL_ARGS[1] == "init=/usr/sbin/init.lua")
 assert(env.KERNEL_ARGS[2] == "image=/boot/nexusos")
 assert(type(env.KERNEL_LOADFILE) == "function", "kernel needs loadfile")
 assert(calls == math.ceil(#stub / 1024), "one inflate per kernel block, got " .. calls)
+
+-- 1b. With a GPU and screen, a progress bar is drawn per block, never from
+-- inside load(), and only when the bar changes.
+local gpu = { w = 80, h = 25, calls = {}, rows = {} }
+ok, err = boot({ ["/boot/nexusos"] = image }, { dataCard = true, gpu = gpu })
+assert(ok, err)
+assert(gpu.calls[1] == "bind")
+local bar = gpu.rows[13]
+assert(bar and bar:find("100%", 1, true) and not bar:find("\u{2591}"), tostring(bar))
+assert(gpu.rows[11]:find("Starting kernel", 1, true), tostring(gpu.rows[11]))
+local sets = 0
+for _, m in ipairs(gpu.calls) do if m == "set" then sets = sets + 1 end end
+assert(sets <= calls + 4, "redraws only on change: " .. sets)
+-- a tiny screen still fits the bar
+gpu = { w = 20, h = 5, calls = {}, rows = {} }
+ok, err = boot({ ["/boot/nexusos"] = image }, { dataCard = true, gpu = gpu })
+assert(ok, err)
+for _, row in pairs(gpu.rows) do
+    local cells = select(2, row:gsub("[^\128-\191]", ""))
+    assert(cells <= 20, "row wider than the screen: " .. row)
+end
 
 -- 2. Compressed image without a data card is refused with a clear message.
 ok, err = boot({ ["/boot/nexusos"] = image }, { dataCard = false })
