@@ -124,16 +124,23 @@ local loadDirMetadata
 -- fetched on first use so that listing a directory stays cheap.
 ---@param v vnode
 local function vnodeTimes(v)
-    if v.mtime == nil then
+    if v.mtime == nil or v.btime == nil then
         local t = 0
         if v.fs and v.fs.lastModified then
             local ok, ms = pcall(v.fs.lastModified, getFsRelativePath(v))
             if ok and type(ms) == "number" and ms > 0 then t = math.floor(ms / 1000) end
         end
-        v.mtime = t
+        if v.mtime == nil then v.mtime = t end
         if v.btime == nil then v.btime = t end
     end
     return v.mtime, v.btime
+end
+
+-- A lazily loaded node keeps its times nil until first use; resolve them
+-- from the disk before a write replaces mtime, or btime would stay nil.
+local function touch(v)
+    vnodeTimes(v)
+    v.mtime = getRealTime()
 end
 
 ---@param dir vnode
@@ -1356,7 +1363,7 @@ function vfs.touch(path)
     if not (not proc or proc.euid == 0 or owner or vfs.can(authPath, "w")) then
         return false, "Permission denied"
     end
-    vnode.mtime = getRealTime()
+    touch(vnode)
     markDirty(vnode.parent)
     return true
 end
@@ -1485,7 +1492,7 @@ function vfs.open(path, mode)
     function file:write(str)
         if not isOpen() then return nil, "file is closed" end
         if vnode.type == "VREG" then
-            vnode.mtime = getRealTime()
+            touch(vnode)
             markDirty(vnode.parent)
         end
         return fs.write(handle, str)
@@ -1848,7 +1855,7 @@ function vfs.write(fd, value)
     local d = descriptor(fd)
     if not d or not (d.flag:find("w") or d.flag:find("a")) then return nil, "Bad file descriptor" end
     if d.vnode and d.vnode.type == "VREG" then
-        d.vnode.mtime = getRealTime()
+        touch(d.vnode)
         markDirty(d.vnode.parent)
     end
     return (d.fs or devfs).write(d.fd, value)

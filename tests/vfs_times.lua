@@ -167,10 +167,14 @@ assert(fsA.makeDirectory("/pre"))
 local h = assert(fsA.open("/pre/old.txt", "w"))
 fsA.write(h, "old")
 fsA.close(h)
+h = assert(fsA.open("/pre/fresh.txt", "w"))
+fsA.write(h, "fresh")
+fsA.close(h)
 local lastModifiedCalls = 0
 fsA.lastModified = function(path)
     lastModifiedCalls = lastModifiedCalls + 1
     if path == "/pre/old.txt" then return 1700000000123 end -- milliseconds, as OC returns
+    if path == "/pre/fresh.txt" then return 1700000500123 end
     return 0
 end
 assert(vfs.mount(fsA, "/"))
@@ -197,6 +201,14 @@ f:close()
 local updated = vfs.attributes("/pre/old.txt")
 assert(updated.mtime == now and updated.btime == 1700000000, updated.mtime .. " " .. updated.btime)
 
+-- 3b. Writing a file whose times were never looked at keeps btime from the
+-- disk (a nil btime used to break every metadata sync).
+f = assert(vfs.open("/pre/fresh.txt", "a"))
+f:write("!")
+f:close()
+local fresh = vfs.attributes("/pre/fresh.txt")
+assert(fresh.mtime == now and fresh.btime == 1700000500, tostring(fresh.btime))
+
 -- 4. touch uses the real time too.
 now = now + 60
 assert(vfs.touch("/new.txt"))
@@ -205,7 +217,8 @@ assert(vfs.attributes("/new.txt").mtime == now)
 -- 5. .meta persists whole seconds, including disk-derived times.
 assert(vfs.saveMetadata())
 local meta = fsA.content("/pre/.meta")
-assert(meta and meta:find("^old%.txt:VREG:%d+:" .. (now - 60) .. ":1700000000:"), meta)
+assert(meta and meta:find("old%.txt:VREG:%d+:" .. (now - 60) .. ":1700000000:"), meta)
+assert(meta:find("fresh%.txt:VREG:%d+:" .. (now - 60) .. ":1700000500:"), meta)
 
 -- 6. chmod takes Nexus notation only and reports success.
 assert(vfs.chmod("/new.txt", 640) == true)
