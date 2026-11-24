@@ -92,6 +92,7 @@ function fsmock.open(p, mode)
 end
 
 local source = assert(io.open("root/usr/bin/edit.lua")):read("a")
+local written = 0
 local function startEditor(...)
     local editorEnv = setmetatable({
         require = function(name)
@@ -102,7 +103,11 @@ local function startEditor(...)
         component = { list = function() return function() return "gpu" end end,
                       proxy = function() return { getViewport = function() return W, H end } end },
         io = { read = function(...) return term:read(...) end,
-               write = function(...) term:write(table.concat({ ... })) end,
+               write = function(...)
+                   local text = table.concat({ ... })
+                   written = written + #text
+                   term:write(text)
+               end,
                isatty = function() return true end,
                stderr = { write = function(_, s) error("stderr: " .. s) end } },
     }, { __index = _G })
@@ -168,6 +173,18 @@ assert(files["/home/notes.txt"] == "  world\nhello\n x\n", files["/home/notes.tx
 ed.ctrl("f"); ed.type("x"); ed.enter()
 rows = screenRows()
 assert(rows[H]:find("Ln 3, Col 2"), rows[H])
+
+-- 3b. Moving the cursor rewrites only the status line, not the text rows.
+written = 0
+ed.key("left")
+assert(written < 2 * W, "cursor move wrote " .. written .. " bytes")
+rows = screenRows()
+assert(rows[1] == "  world" and rows[3] == " x" and rows[H]:find("Ln 3, Col 1"), rows[H])
+-- a cancelled prompt gives the status line back
+ed.ctrl("g"); ed.send(27, 1)
+rows = screenRows()
+assert(rows[H]:find("Ln 3, Col 1"), rows[H])
+ed.key("right")
 
 -- 4. Closing with unsaved changes needs a second ^W; the shell comes back.
 ed.type("!")
