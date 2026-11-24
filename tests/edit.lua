@@ -45,7 +45,8 @@ local apis = {
     computer = { uptime = function() return 0 end },
     event = { pull = coroutine.yield, setForeground = function() end, getForeground = function() return 2 end },
     process = { get = function(pid) return pid == 2 and { instance = 1, signals = signals } or nil end,
-                getCurrentPID = function() return 2 end },
+                getCurrentPID = function() return 2 end,
+                blockIO = function() coroutine.yield() end, wakeIO = function() end },
     module = { require = function() return vt.module end },
     system = { config = {}, createKernelThread = function(fn) vt.repaint = coroutine.create(fn) end },
 }
@@ -125,9 +126,10 @@ local function startEditor(...)
     local codes = { up = 200, down = 208, left = 203, right = 205, home = 199, ["end"] = 207, delete = 211 }
     function ed.send(char, code)
         assert(coroutine.status(co) == "suspended", "editor exited")
-        step("key_down", "kb", char, code or 30)
-        if coroutine.status(co) == "suspended" then step("key_up", "kb", char, code or 30)
-        else term.pressing[code or 30] = false end
+        term:signal("key_down", "kb", char, code or 30)
+        step()
+        term:signal("key_up", "kb", char, code or 30)
+        if coroutine.status(co) == "suspended" then step() end
     end
     function ed.type(text) for i = 1, #text do ed.send(text:byte(i), 30) end end
     function ed.key(name, n) for _ = 1, n or 1 do ed.send(0, codes[name]) end end

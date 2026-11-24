@@ -45,7 +45,8 @@ local apis = {
     computer = { uptime = function() return 0 end },
     event = { pull = coroutine.yield, setForeground = function() end, getForeground = function() return 2 end },
     process = { get = function(pid) return pid == 2 and { instance = 1, signals = signals } or nil end,
-                getCurrentPID = function() return 2 end },
+                getCurrentPID = function() return 2 end,
+                blockIO = function() coroutine.yield() end, wakeIO = function() end },
     module = { require = function() return vt.module end },
     system = { config = {}, createKernelThread = function(fn) vt.repaint = coroutine.create(fn) end },
 }
@@ -80,15 +81,13 @@ local function reading(...)
     local co = coroutine.create(function() result = table.pack(term:read(table.unpack(args, 1, args.n))) end)
     assert(coroutine.resume(co))
     local feeder = {}
+    -- keys go through the tty's input layer, as the kernel hook delivers them
     function feeder.send(char, code)
         assert(coroutine.status(co) == "suspended", "reader already finished")
-        assert(coroutine.resume(co, "key_down", "kb", char, code or 0))
-        if coroutine.status(co) == "suspended" then
-            assert(coroutine.resume(co, "key_up", "kb", char, code or 0))
-        else
-            -- the next read would receive this key_up from the event queue
-            term.pressing[code or 0] = false
-        end
+        term:signal("key_down", "kb", char, code or 0)
+        assert(coroutine.resume(co))
+        term:signal("key_up", "kb", char, code or 0)
+        if coroutine.status(co) == "suspended" then assert(coroutine.resume(co)) end
     end
     function feeder.type(text) for i = 1, #text do feeder.send(text:byte(i), 30) end end
     function feeder.key(name, times) for _ = 1, times or 1 do feeder.send(0, K[name]) end end

@@ -54,7 +54,8 @@ local apis = {
         setForeground = function(pid) foreground = pid end,
         getForeground = function() return foreground end,
     },
-    process = { get = function(pid) return pid == 2 and owner or nil end, getCurrentPID = function() return 2 end },
+    process = { get = function(pid) return pid == 2 and owner or nil end, getCurrentPID = function() return 2 end,
+                blockIO = function() coroutine.yield() end, wakeIO = function() end },
     module = { require = function() return vt.module end },
     system = { config = {}, createKernelThread = function(fn) repaint = coroutine.create(fn) end },
 }
@@ -82,11 +83,13 @@ tick()
 assert(cellBackground(3, 1) == 0xFFFFFF and fullFrames == framesBeforeIdle)
 
 now = 1.6
-assert(coroutine.resume(reader, "key_down", "keyboard", string.byte("A"), 30))
+terminal:signal("key_down", "keyboard", string.byte("A"), 30)
+assert(coroutine.resume(reader))
 tick()
 assert(frames[0][key(3, 1)][1] == "A" and cellBackground(3, 1) == 0)
 assert(cellBackground(4, 1) == 0xFFFFFF)
-assert(coroutine.resume(reader, "key_down", "keyboard", 13, 28))
+terminal:signal("key_down", "keyboard", 13, 28)
+assert(coroutine.resume(reader))
 tick()
 assert(text == "A" and cellBackground(4, 1) == 0)
 devfs.close(input)

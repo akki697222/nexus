@@ -78,5 +78,21 @@ for i = 1, 300 do event.dispatch(table.pack("spam", i)) end
 local first = table.pack(spammed.resume())
 assert(first[1] == "spam" and first[2] == 300 - 256 + 1, "oldest events are dropped first: " .. tostring(first[2]))
 
+-- Kernel hooks see every signal before it is queued; a failing hook is
+-- logged and does not stop the others or the dispatch.
+checkArg = checkArg or function() end
+local seen = {}
+local logged = {}
+printk = function(msg) logged[#logged + 1] = msg end
+local bad = event.addHook(function() error("boom") end)
+local good = event.addHook(function(ev) seen[#seen + 1] = ev[1] end)
+event.dispatch(table.pack("key_down", "kb", 98, 48))
+assert(seen[1] == "key_down" and #seen == 1)
+assert(logged[1] and logged[1]:find("hook failed"), tostring(logged[1]))
+event.removeHook(good)
+event.removeHook(bad)
+event.dispatch(table.pack("key_up", "kb", 98, 48))
+assert(#seen == 1, "removed hooks are not called")
+
 process, computer, event = saved.process, saved.computer, saved.event
 io.write("event wakeup tests passed\n")

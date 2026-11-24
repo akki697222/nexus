@@ -99,8 +99,9 @@ local function newProcessApi(tier)
         getRunQueue = true,
         resume = true,
         dispatchWaiting = true,
-        blockIO = true,
-        wakeIO = true,
+        -- IO waits are for kernel modules (the tty input queue)
+        blockIO = tier == "user" or nil,
+        wakeIO = tier == "user" or nil,
         get = true,
         getCurrent = true,
         getParent = true,
@@ -214,7 +215,7 @@ local function newApis(tier)
         filesystem = lock(vfs, "filesystem"),
         component  = component,
         computer   = computer,
-        event      = functions(event),
+        event      = functions(event, tier == "user" and { addHook = true, removeHook = true } or nil),
         unicode    = functions(unicode),
         permission = functions(permission),
         module     = newModuleApi(),
@@ -242,8 +243,8 @@ end
 local function newBaseEnv(tier)
     local apis = newApis(tier)
     local base = {
-        coroutine = coroutine,
         debug = debug,
+        coroutine = coroutine,
         io = io,
         math = math,
         os = os,

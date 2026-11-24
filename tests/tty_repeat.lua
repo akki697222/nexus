@@ -1,5 +1,5 @@
--- TTY key repeat: the tty repeats held keys on its own timer and ignores
--- OC's repeated key_down events.
+-- TTY input layer: key state, the tty's own key repeat, the input queue
+-- (type-ahead), Ctrl+C without a reader.
 -- Run from the Nexus directory: lua tests/tty_repeat.lua
 local driverPath = "root/usr/lib/modules/system/kernel/drivers/tty/"
 local W, H = 20, 6
@@ -36,6 +36,7 @@ local gpu = {
 }
 
 local now = 0
+local wakes, foreground = 0, 2
 local devfsEnv = setmetatable({ vfsk = { createVNode = function() return {} end } }, { __index = _G })
 assert(loadfile("src/devfs.lua", "t", devfsEnv))()
 local vt
@@ -45,11 +46,12 @@ local apis = {
     filesystem = { open = function() return nil end },
     component = { list = function() return function() return "gpu" end end, proxy = function() return gpu end },
     computer = { uptime = function() return now end },
-    event = { pull = coroutine.yield, setForeground = function() end, getForeground = function() return 2 end },
+    event = { pull = coroutine.yield, setForeground = function() end, getForeground = function() return foreground end },
     process = { get = function(pid) return pid == 2 and { instance = 1, signals = signals } or nil end,
-                getCurrentPID = function() return 2 end },
+                getCurrentPID = function() return 2 end, getCurrent = function() return { pid = 2, tty = 0 } end,
+                blockIO = function() coroutine.yield() end, wakeIO = function() wakes = wakes + 1 end },
     module = { require = function() return vt.module end },
-    system = { config = {}, createKernelThread = function(fn) vt.repaint = coroutine.create(fn) end },
+    system = { config = { key_repeat_delay = 0.4, key_repeat_rate = 20 }, createKernelThread = function(fn) vt.repaint = coroutine.create(fn) end },
 }
 local env = setmetatable({ require = function(name) return assert(apis[name], name) end }, { __index = _G })
 vt = assert(loadfile(driverPath .. "vt.lua", "t", env))()
@@ -75,106 +77,147 @@ local function cursorCell()
 end
 
 
-local LEFT, RIGHT, A = 203, 205, 30
--- A read driven by hand: each step resumes the reader with an event, or
--- with nothing (the pull timed out). `waits` is the timeout it asked for.
-local function reading(...)
-    local args = table.pack(...)
-    local r = {}
-    local co = coroutine.create(function(...)
-        r.result = table.pack(term:read(table.unpack(args, 1, args.n)))
-    end)
-    local function step(...)
-        local ok, timeout = coroutine.resume(co, ...)
-        assert(ok, timeout)
-        r.wait = timeout
-    end
-    step()
-    function r.ev(...) assert(coroutine.status(co) == "suspended", "reader finished"); step(...) end
-    function r.tick(t) now = t; r.ev() end
-    function r.done() return coroutine.status(co) == "dead" end
-    function r.lastWait() return r.wait end
-    return r
+local LEFT, RIGHT, A, ENTER, SHIFT = 203, 205, 30, 28, 42
+local function down(char, key) term:signal("key_down", "kb", char, key) end
+local function up(char, key) term:signal("key_up", "kb", char, key) end
+local function queued() return #term.queue end
+local function tokens()
+    local out = {}
+    for i, t in ipairs(term.queue) do out[i] = t.paste or (t.char ~= 0 and string.char(t.char)) or ("k" .. t.key) end
+    return table.concat(out, ",")
 end
+local function clear() term.queue = {} end
 
--- column of the line editor's cursor ("$ " prompt), independent of blinking
-local function cursorX() return term.pos + 3 end
+-- 1. One token per press; OC's repeat events are ignored; modifiers give
+-- nothing; every push wakes the readers.
+down(("a"):byte(), A)
+down(("a"):byte(), A); down(("a"):byte(), A)
+assert(tokens() == "a", tokens())
+assert(wakes == 1)
+up(("a"):byte(), A)
+down(0, SHIFT); up(0, SHIFT)
+assert(queued() == 1, "modifiers do not produce input")
+clear()
 
--- 1. Canonical mode: OC's own repeats are ignored; the tty repeats after
--- the delay, once per interval, and stops on key_up.
-term:write("$ ")
-local r = reading("*l")
-for _, c in ipairs({ "a", "b", "c", "d", "e", "f", "g", "h" }) do
-    r.ev("key_down", "kb", c:byte(), A); r.ev("key_up", "kb", c:byte(), A)
-end
-assert(cursorX() == 11)
+-- 2. The tty repeats a held key itself: after the delay, then at the rate,
+-- for any key (Enter too), until key_up.
 now = 1
-r.ev("key_down", "kb", 0, LEFT)
-assert(cursorX() == 10, "first press moves once")
-assert(math.abs(r.lastWait() - 0.4) < 1e-9, "waits for the repeat delay, got " .. tostring(r.lastWait()))
-for _ = 1, 5 do r.ev("key_down", "kb", 0, LEFT) end  -- OC repeats: ignored
-assert(cursorX() == 10, "OC repeat events do not move the cursor")
-r.tick(1.4)
-assert(cursorX() == 9, "first repeat after the delay")
-r.tick(1.45); r.tick(1.5)
-assert(cursorX() == 7, "then one per interval")
-r.ev("key_up", "kb", 0, LEFT)
-assert(r.lastWait() == nil, "nothing held: wait without a timeout")
-r.tick(2)
-assert(cursorX() == 7, "no repeat after key_up")
+down(13, ENTER)
+tty.tick(1.2)
+assert(queued() == 1, "not before the delay")
+tty.tick(1.4)
+assert(queued() == 2, "first repeat after the delay")
+tty.tick(1.45); tty.tick(1.5)
+assert(queued() == 4, "then one per 0.05 s")
+up(13, ENTER)
+tty.tick(2)
+assert(queued() == 4, "no repeat after key_up")
+clear()
 
--- printable keys do not repeat in canonical mode
-r.ev("key_down", "kb", ("z"):byte(), A)
-r.tick(3)
-paint()
-assert(row(1) == "$ abcdzefgh", row(1))
-r.ev("key_up", "kb", ("z"):byte(), A)
+-- 3. Late passes: the due repeats are queued together (capped), and a rate
+-- above 20/s gives more than one repeat in a tick.
+now = 3
+down(0, LEFT)
+tty.tick(3.4)
+assert(queued() == 2)
+tty.tick(3.55)
+assert(queued() == 5, "three were due: " .. queued())
+now = 4.9; down(0, LEFT)          -- OC still repeating
+tty.tick(5)
+assert(queued() == 9, "capped burst: " .. queued())
+up(0, LEFT)
+clear()
+apis.system.config.key_repeat_rate = 30
+now = 6
+down(0, RIGHT)
+for _, t in ipairs({ 6.4, 6.45, 6.5, 6.55, 6.6, 6.65, 6.7 }) do tty.tick(t) end
+-- press + repeats at 6.4 + i/30 up to 6.7: 10 of them
+assert(queued() == 11, "30/s: " .. queued())
+up(0, RIGHT)
+apis.system.config.key_repeat_rate = 20
+clear()
 
--- 2. A lost key_up: without OC's repeats for a while the key counts as up.
+-- 4. A lost key_up: without OC repeat events for 1 s the key counts as up.
 now = 10
-r.ev("key_down", "kb", 0, RIGHT)
-local x = cursorX()
-r.tick(10.4); r.tick(10.45)
-assert(cursorX() == x + 2)
-r.ev("key_down", "kb", 0, RIGHT)   -- OC still repeating at 10.45
-r.tick(11.3)
-assert(cursorX() == x + 3, "still held")
-r.tick(11.5)                        -- > 1 s since OC's last repeat
-assert(cursorX() == x + 3, "stale key stops repeating")
-assert(r.lastWait() == nil)
-assert(not term.pressing[RIGHT], "and is marked released")
-r.ev("key_down", "kb", 13, 28)
-term.pressing[28] = false
-assert(r.done() and r.result[1] == "abcdzefgh")
+down(0, RIGHT)
+tty.tick(10.4); tty.tick(10.45)
+assert(queued() == 3)
+now = 10.45; down(0, RIGHT)       -- OC still repeating
+tty.tick(11.3)
+assert(queued() > 3, "still held")
+local n = queued()
+tty.tick(11.5)
+assert(queued() == n and not term.keys[RIGHT] and term.held == nil, "stale key released")
+clear()
 
--- 3. Raw mode: every key repeats, across separate reads, as sequences.
-now = 20
-local function rawRead()
-    local rr = reading(1, { raw = true })
-    return rr
+-- 5. Ctrl+C and Ctrl+D do not repeat.
+down(4, 32); tty.tick(20); up(4, 32)
+assert(queued() == 1, "Ctrl+D once: " .. queued())
+clear()
+
+-- 6. Type-ahead: keys typed while nobody reads wait for the next read.
+term:write("$ ")
+for _, c in ipairs({ "l", "s", "\r" }) do
+    down(c:byte(), c == "\r" and ENTER or A); up(c:byte(), c == "\r" and ENTER or A)
 end
-local rr = rawRead()
-rr.ev("key_down", "kb", 0, LEFT)
-assert(rr.done() and rr.result[1] == "\27", "first byte of the sequence")
-local rest = term:read(2, { raw = true })
-assert(rest == "[D")
-rr = rawRead()
-rr.tick(20.2)
-assert(not rr.done(), "not yet due")
-rr.tick(20.4)
-assert(rr.done(), "repeat delivered to the next read")
-assert(term:read(2, { raw = true }) == "[D")
-rr = rawRead()
-rr.ev("key_down", "kb", 0, LEFT)   -- OC repeat: ignored
-assert(not rr.done())
-rr.tick(20.45)
-assert(rr.done())
-assert(term:read(2, { raw = true }) == "[D")
-rr = rawRead()
-rr.ev("key_up", "kb", 0, LEFT)
-rr.tick(21)
-assert(not rr.done(), "released: no more repeats")
-rr.ev("key_down", "kb", ("q"):byte(), 16)
-assert(rr.done() and rr.result[1] == "q")
+local co = coroutine.create(function() return term:read("*l") end)
+local ok, line = coroutine.resume(co)
+assert(ok and coroutine.status(co) == "dead" and line == "ls", tostring(line))
+paint()
+assert(row(1) == "$ ls", row(1))
 
-print("tty repeat tests passed")
+-- 7. Ctrl+C while nobody reads interrupts the foreground process and drops
+-- pending input; while a line is read it ends the line.
+down(("x"):byte(), A); up(("x"):byte(), A)
+foreground = 2
+local before = #signals
+down(3, 46); up(3, 46)
+assert(#signals == before + 1 and signals[#signals] == 2 and queued() == 0)
+now = 25; down(3, 46); tty.tick(26); up(3, 46)
+assert(#signals == before + 2, "Ctrl+C does not repeat")
+term:write("$ ")
+co = coroutine.create(function() return term:read("*l") end)
+assert(coroutine.resume(co))
+assert(coroutine.status(co) == "suspended", "blocks with an empty queue")
+down(("y"):byte(), A); assert(coroutine.resume(co))
+down(3, 46); assert(coroutine.resume(co))
+assert(#signals == before + 3, "Ctrl+C in a read signals the reader")
+up(("y"):byte(), A); up(3, 46)
+down(13, ENTER); assert(coroutine.resume(co)); up(13, ENTER)
+assert(coroutine.status(co) == "dead", "the line typed before Ctrl+C is dropped")
+
+-- 8. Raw reads take one key each; repeats keep coming across reads.
+now = 30
+co = coroutine.create(function() return term:read(1, { raw = true }) end)
+assert(coroutine.resume(co))
+down(0, LEFT)
+local _, b1 = coroutine.resume(co)
+assert(b1 == "\27" and term:read(2, { raw = true }) == "[D")
+tty.tick(30.4)
+assert(term:read(3, { raw = true }) == "\27[D", "a repeat with no reader waiting is kept")
+up(0, LEFT)
+
+-- 9. The queue is bounded.
+clear()
+for i = 1, 300 do down(("q"):byte(), 16); up(("q"):byte(), 16) end
+assert(queued() == 256)
+clear()
+
+-- 9b. A process that took the foreground to read key events itself gets
+-- them alone; the tty does not queue them for its next read.
+foreground = 99
+down(("g"):byte(), 34); tty.tick(100); up(("g"):byte(), 34)
+assert(queued() == 0, "keys for another foreground process are not queued")
+foreground = 2
+down(("h"):byte(), 35); up(("h"):byte(), 35)
+assert(queued() == 1)
+clear()
+
+-- 10. tty.signal feeds the active tty.
+tty.signal({ "key_down", "kb", ("z"):byte(), 44, n = 4 })
+assert(tokens() == "z")
+tty.signal({ "key_up", "kb", ("z"):byte(), 44, n = 4 })
+assert(tty.isKeyPressing(44) == false)
+clear()
+
+print("tty input tests passed")

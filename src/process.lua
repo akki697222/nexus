@@ -541,7 +541,7 @@ function process.kill(pid)
 end
 
 -- Kernel-only targeted IO wait. A channel is an opaque kernel-owned identity;
--- this API is removed from user and module process environments in env.lua.
+-- this API is removed from user process environments in env.lua (kernel modules such as the tty input queue use it).
 function process.blockIO(channel)
     if channel == nil then error("Invalid IO wait channel", 2) end
     local proc = getCurrentExecutionEntry()

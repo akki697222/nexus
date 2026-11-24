@@ -17,6 +17,9 @@ local config = {
     -- after boot, printk only reaches the console at this level or worse
     -- (emerg alert crit err warning notice info debug, or 0..7); dmesg has all
     console_loglevel = "err";
+    -- held keys: seconds before repeating, then repeats per second
+    key_repeat_delay = 0.35;
+    key_repeat_rate = 30;
     -- every 2s of activity, log kernel loop statistics to dmesg (debug)
     loop_stats = false;
     -- Filesystem

@@ -232,7 +232,8 @@ function event.wants(entry, now, ev)
     local q = queues[entry.pid]
     if q and q[1] then return true end
     local deadline = entry.thread and wait_deadlines[entry.thread]
-    if deadline and now >= deadline then return true end
+    -- uptime moves in 0.05 s ticks that do not add up exactly
+    if deadline and now + 1e-6 >= deadline then return true end
     local sig = ev and ev.n > 0 and ev[1] or nil
     for _, h in pairs(handlers) do
         if h.pid == entry.pid and (now >= h.timeout or (sig and (h.key == nil or h.key == sig))) then
@@ -267,7 +268,7 @@ function event.pullFiltered(...)
                 return table.unpack(ev, 1, ev.n)
             end
         end
-    until computer.uptime() >= deadline
+    until computer.uptime() + 1e-6 >= deadline
 end
 
 function event.pull(...)
@@ -287,8 +288,31 @@ function event.timer(interval, callback, times)
     return event.register(false, callback, interval, times)
 end
 
+-- Kernel hooks: called with every signal before it is queued for
+-- processes (the tty input layer uses this). Module tier only.
+local hooks, nextHook = {}, 1
+
+---@param fn fun(ev: table)
+---@return integer
+function event.addHook(fn)
+    checkArg(1, fn, "function")
+    local id = nextHook
+    nextHook = nextHook + 1
+    hooks[id] = fn
+    return id
+end
+
+function event.removeHook(id)
+    hooks[id] = nil
+end
+
 function event.dispatch(ev)
     if not ev or ev.n == 0 then return end
+
+    for _, hook in pairs(hooks) do
+        local ok, err = pcall(hook, ev)
+        if not ok then printk("event: hook failed: " .. tostring(err), "err") end
+    end
 
     local is_interactive = interactive_events[ev[1]]
 

@@ -12,6 +12,8 @@ local computer = require("computer")
 
 ---@type tty_driver[]
 local ttys = {}
+-- The tty the keyboard types into.
+local activeId = 0
 
 ---@class tty_driver : console_device
 ---@field device console_device|vt_driver|nil
@@ -27,8 +29,6 @@ local tty_driver = {
     -- for readmode
     buffer = "",      -- current line editing buffer
     read_buffer = "", -- committed input buffer
-    pressing = {},
-    pressingChars = {},
     reading = false,
     eof = false,
     flags = {
@@ -61,19 +61,41 @@ end
 local KEY_BACK, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 14, 200, 208, 203, 205
 local KEY_HOME, KEY_END, KEY_DELETE, KEY_PGUP, KEY_PGDN = 199, 207, 211, 201, 209
 local KEY_INSERT = 210
--- Keys that repeat while held. The tty repeats them itself on a timer from
--- the first key_down until key_up; OC's own repeated key_down events are
--- dropped, so a backlog of them can no longer carry the cursor on after
--- the key is released.
-local REPEAT_DELAY = 0.4      -- seconds held before the first repeat
-local REPEAT_INTERVAL = 0.05  -- seconds between repeats (one game tick)
--- Without OC's repeat events for this long, the key is taken as released
--- (a key_up lost when the window loses focus, for example).
-local REPEAT_STALE = 1.0
-local REPEATABLE = {
-    [KEY_BACK] = true, [KEY_UP] = true, [KEY_DOWN] = true, [KEY_LEFT] = true, [KEY_RIGHT] = true,
-    [KEY_HOME] = true, [KEY_END] = true, [KEY_DELETE] = true, [KEY_PGUP] = true, [KEY_PGDN] = true,
+-- ------------------------------------------------------------
+-- Input layer. Key signals reach the tty in kernel context (an event hook,
+-- see tty module load), whether or not anything is reading: the tty keeps
+-- the key state, repeats held keys itself and queues one token per key
+-- press (or repeat) for its readers. Readers block on the queue; what is
+-- typed while nobody reads is kept for the next read (up to INPUT_LIMIT).
+-- OC's own repeated key_down events only show that a key is still down.
+-- ------------------------------------------------------------
+local INPUT_LIMIT = 256
+-- Modifier and lock keys never produce input.
+local MODIFIERS = {
+    [29] = true, [157] = true, -- control
+    [42] = true, [54] = true,  -- shift
+    [56] = true, [184] = true, -- alt
+    [219] = true, [220] = true, -- meta
+    [58] = true, [69] = true, [70] = true, -- caps, num, scroll lock
 }
+-- Repeat delay and rate from /boot/config.lua (key_repeat_delay in seconds,
+-- key_repeat_rate per second). Rates above 20 (one per game tick) are met
+-- by queuing more than one repeat in a tick.
+local function repeatDelay()
+    return tonumber(system.config and system.config.key_repeat_delay) or 0.35
+end
+local function repeatInterval()
+    local rate = tonumber(system.config and system.config.key_repeat_rate) or 30
+    return 1 / math.max(1, rate)
+end
+-- most repeats queued at once when the tty fell behind
+local REPEAT_BURST = 4
+-- Without OC repeat events for this long a held key is taken as released
+-- (its key_up was lost, for example when the window lost focus).
+local REPEAT_STALE = 1.0
+-- Ctrl+C and Ctrl+D act once per press.
+local NO_REPEAT_CHARS = { [3] = true, [4] = true }
+
 -- Raw mode: special keys arrive as the usual terminal escape sequences.
 local RAW_SEQUENCES = {
     [KEY_UP] = "\27[A", [KEY_DOWN] = "\27[B", [KEY_RIGHT] = "\27[C", [KEY_LEFT] = "\27[D",
@@ -264,7 +286,113 @@ function tty_driver:editKey(char, key, mask, hint)
     return true
 end
 
--- One key press (or a repeat of a held key) while reading.
+-- The process currently blocked in or running a read, if it still exists.
+function tty_driver:activeReader()
+    local r = self.reader
+    if not r then return nil end
+    local proc = process.get(r.pid)
+    if not proc or proc.instance ~= r.instance then
+        self.reader = nil
+        return nil
+    end
+    return r
+end
+
+-- Whether keyboard input is for this tty's readers. A process that made
+-- itself the foreground (event.setForeground) to take key events directly
+-- gets them alone; queuing them too would replay them at the next read.
+function tty_driver:ownsInput()
+    if self:activeReader() then return true end
+    local last = self.lastReader
+    return last == nil or event.getForeground() == last
+end
+
+-- Queues a token for readers and wakes them.
+function tty_driver:push(token)
+    local q = self.queue
+    if #q >= INPUT_LIMIT then return end
+    q[#q + 1] = token
+    process.wakeIO(self.channel)
+end
+
+-- A signal from the keyboard (kernel context).
+function tty_driver:signal(name, _, char, key)
+    if name == "key_down" then
+        if not key then return end
+        local now = computer.uptime()
+        if self.keys[key] then
+            -- OC's repeat of a held key
+            local held = self.held
+            if held and held.key == key then held.seen = now end
+            return
+        end
+        self.keys[key] = char or 0
+        if MODIFIERS[key] then return end
+        if not self:ownsInput() then
+            self.held = nil
+            return
+        end
+        if char == 3 and not self:activeReader() and self.flags.canonical then
+            -- Ctrl+C while nobody reads: interrupt the foreground process
+            -- and drop the pending input
+            local proc = process.get(event.getForeground())
+            if proc then table.insert(proc.signals, 2) end
+            self.queue = {}
+            self.held = nil
+            return
+        end
+        if NO_REPEAT_CHARS[char] then
+            self.held = nil
+        else
+            self.held = { key = key, char = char, due = now + repeatDelay(), seen = now }
+        end
+        self:push({ char = char, key = key })
+    elseif name == "key_up" then
+        if not key then return end
+        self.keys[key] = nil
+        local held = self.held
+        if held and held.key == key then self.held = nil end
+    elseif name == "clipboard" then
+        self:push({ paste = tostring(char or "") })
+    end
+end
+
+-- Repeats of the held key that are due (kernel thread, every pass).
+function tty_driver:tickRepeat(now)
+    local held = self.held
+    -- uptime moves in 0.05 s ticks that do not add up exactly
+    if not held or now + 1e-6 < held.due then return end
+    if not self:ownsInput() then
+        self.held = nil
+        return
+    end
+    if now - held.seen > REPEAT_STALE then
+        self.keys[held.key] = nil
+        self.held = nil
+        return
+    end
+    -- every repeat that fell due, keeping the schedule so the rate holds
+    -- when passes are late
+    local interval = repeatInterval()
+    local n = math.floor((now - held.due) / interval + 1e-6) + 1
+    held.due = held.due + n * interval
+    if held.due <= now then held.due = now + interval end
+    for _ = 1, math.min(n, REPEAT_BURST) do
+        self:push({ char = held.char, key = held.key })
+    end
+end
+
+-- Next queued token, blocking until there is one.
+function tty_driver:nextToken()
+    while true do
+        local token = table.remove(self.queue, 1)
+        if token then return token end
+        self.device:setInputCursor(self.in_pid)
+        process.blockIO(self.channel)
+    end
+end
+
+-- One key press (or repeat) while reading.
 function tty_driver:keyPress(char, key, canonical, mask, hint)
     if canonical then
         self.reading = self:editKey(char, key, mask, hint)
@@ -281,6 +409,26 @@ function tty_driver:keyPress(char, key, canonical, mask, hint)
     end
 end
 
+function tty_driver:paste(text, canonical, mask, hint)
+    if canonical then
+        -- paste into the line, up to the first line break
+        text = text:gsub("\r", "")
+        local first, rest = text:match("^([^\n]*)\n?(.*)$")
+        self:insertText((first:gsub("[%c]", "")), mask)
+        if text:find("\n") then
+            self.reading = self:editKey(13, nil, mask, hint)
+            if rest ~= "" then self.read_buffer = self.read_buffer .. rest end
+        end
+    else
+        self.read_buffer = self.read_buffer .. text
+        if not self.flags.disableWriteCharInput and not self.rawRead then
+            self.device:write(mask or text)
+        end
+        self.reading = false
+    end
+end
+
+-- Takes queued input until the current read has what it needs.
 function tty_driver:read_pump(mask, hint)
     self.reading = true
     local canonical = self.flags.canonical and not self.rawRead
@@ -292,67 +440,13 @@ function tty_driver:read_pump(mask, hint)
     end
     self.device:setInputCursor(self.in_pid)
     while self.reading do
-        -- wait for the next event, or until the held key is due to repeat
-        local held = self.held
-        local ev
-        if held then
-            ev = { event.pull(math.max(0, held.due - computer.uptime())) }
+        local token = self:nextToken()
+        if token.paste then
+            self:paste(token.paste, canonical, mask, hint)
         else
-            ev = { event.pull() }
+            self:keyPress(token.char, token.key, canonical, mask, hint)
         end
-        local etype = ev[1]
-        local char = ev[3]
-        local key = ev[4]
-        local now = computer.uptime()
-
-        if etype == "key_down" then
-            if self.pressing[key] then
-                -- OC's repeat of a held key: only proves it is still down
-                if held and held.key == key then held.seen = now end
-            else
-                self.pressing[key] = true
-                if char then self.pressingChars[char] = true end
-                if self.rawRead or REPEATABLE[key] then
-                    self.held = { key = key, char = char, due = now + REPEAT_DELAY, seen = now }
-                else
-                    self.held = nil
-                end
-                self:keyPress(char, key, canonical, mask, hint)
-                if self.reading then self.device:setInputCursor(self.in_pid) end
-            end
-        elseif etype == "key_up" then
-            self.pressing[key] = false
-            if char then self.pressingChars[char] = false end
-            if held and held.key == key then self.held = nil end
-        elseif etype == "clipboard" then
-            if canonical then
-                -- paste into the line, up to the first line break
-                local text = tostring(char or ""):gsub("\r", "")
-                local first, rest = text:match("^([^\n]*)\n?(.*)$")
-                self:insertText((first:gsub("[%c]", "")), mask)
-                if text:find("\n") then
-                    self.reading = self:editKey(13, nil, mask, hint)
-                    if rest ~= "" then self.read_buffer = self.read_buffer .. rest end
-                end
-            else
-                self.read_buffer = self.read_buffer .. char
-                if not self.flags.disableWriteCharInput and not self.rawRead then
-                    self.device:write(mask or char)
-                end
-                self.reading = false
-            end
-        elseif held and self.held == held and now + 1e-6 >= held.due then
-            -- (uptime moves in ticks; 0.05 steps do not add up exactly)
-            if now - held.seen > REPEAT_STALE then
-                -- no sign of the key for a while: its key_up was lost
-                self.pressing[held.key] = false
-                self.held = nil
-            else
-                held.due = now + REPEAT_INTERVAL
-                self:keyPress(held.char, held.key, canonical, mask, hint)
-                if self.reading then self.device:setInputCursor(self.in_pid) end
-            end
-        end
+        if self.reading then self.device:setInputCursor(self.in_pid) end
     end
     self.device:setInputCursor(nil)
 end
@@ -445,6 +539,9 @@ end
 
 function tty_driver:read(...)
     self.in_pid = process.getCurrentPID()
+    local me = process.get(self.in_pid)
+    self.reader = { pid = self.in_pid, instance = me and me.instance }
+    self.lastReader = self.in_pid
     event.setForeground(self.in_pid)
     self.reading = true
     self.buffer = ""
@@ -509,6 +606,7 @@ function tty_driver:read(...)
     end
 
     self.in_pid = -1
+    self.reader = nil
     self.history, self.rawRead = nil, false
     return table.unpack(results)
 end
@@ -549,6 +647,7 @@ local tty = {}
 function tty.new(id)
     local dev = setmetatable({}, {__index = tty_driver})
     dev.id = id
+    dev.keys, dev.queue, dev.channel = {}, {}, {}
     dev:init()
     local callbacks = {
         read = function(_handle, ...)
@@ -571,6 +670,7 @@ function tty.switch(id)
     if not dev then return end
     local proc = process.getCurrent()
     proc.tty = id
+    activeId = id
     event.setForeground(proc.pid)
     if dev.device then
         dev.device.dirty = true
@@ -588,11 +688,29 @@ function tty.get(id)
 end
 
 function tty.isCharPressing(char)
-    return tty:getCurrent().pressingChars[char]
+    local t = tty.getCurrent()
+    if not t then return false end
+    for _, c in pairs(t.keys) do
+        if c == char then return true end
+    end
+    return false
 end
 
 function tty.isKeyPressing(key)
-    return tty:getCurrent().pressingChars[key]
+    local t = tty.getCurrent()
+    return t ~= nil and t.keys[key] ~= nil
+end
+
+-- Keyboard signals, from the kernel's event hook.
+function tty.signal(ev)
+    local t = ttys[activeId]
+    if t then t:signal(ev[1], ev[2], ev[3], ev[4]) end
+end
+
+-- Due key repeats of every tty (kernel thread).
+function tty.tick(now)
+    now = now or computer.uptime()
+    for _, t in pairs(ttys) do t:tickRepeat(now) end
 end
 
 function tty.getCursor()
@@ -615,10 +733,23 @@ function tty.read(...)
     return tty.getCurrent():read(...)
 end
 
+local hookId
+
 ---@type kernel_module
 return {
-    load = function() end,
-    unload = function() end,
+    load = function()
+        -- keyboard input reaches the tty in kernel context, read or not
+        hookId = event.addHook(tty.signal)
+        system.createKernelThread(function()
+            while true do
+                tty.tick()
+                coroutine.yield()
+            end
+        end, "tty_input", {})
+    end,
+    unload = function()
+        if hookId then event.removeHook(hookId) end
+    end,
     module = tty,
     manifest = {
         name = "tty",
