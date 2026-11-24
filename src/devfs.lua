@@ -2,11 +2,11 @@
 devfs = {}
 
 ---@class devfs_handle
----@field driver table
+---@field ops table
 ---@field mode string
 
 ---@class devfs_entry
----@field driver table
+---@field ops table
 ---@field vnode vnode
 
 ---@type table<string, devfs_entry>
@@ -32,9 +32,9 @@ function devfs.init()
     vhandles["0"] = { flag = "r", fd = 0, fs = devfs, vnode = vstdin }
     vhandles["1"] = { flag = "w", fd = 1, fs = devfs, vnode = vstdout }
     vhandles["2"] = { flag = "w", fd = 2, fs = devfs, vnode = vstderr }
-    handles["0"] = { mode = "r", driver = system.console.stdin }
-    handles["1"] = { mode = "w", driver = system.console.stdout }
-    handles["2"] = { mode = "w", driver = system.console.stderr }
+    handles["0"] = { mode = "r", ops = system.console.stdin }
+    handles["1"] = { mode = "w", ops = system.console.stdout }
+    handles["2"] = { mode = "w", ops = system.console.stderr }
 end
 
 local DEVFS_CHARS = "abcdefghijklnmopqrstuvwxyz"
@@ -43,17 +43,17 @@ function devfs.char(index)
 end
 
 ---@param name string
----@param driver table
+---@param ops table
 ---@param block? boolean
 ---@param perm? integer
 ---@return boolean, string?, vnode?
-function devfs.create(name, driver, block, perm)
+function devfs.create(name, ops, block, perm)
     --printd("creating device " .. name .. " (block=" .. tostring(block) .. ")")
     if devices[name] then
         return false, "Device already exists"
     end
     local vnode = vfsk.createVNode("/dev", name, block and "VBLK" or "VCHR", devfs, perm)
-    devices[name] = { driver = driver, vnode = vnode }
+    devices[name] = { ops = ops, vnode = vnode }
     return true, nil, vnode
 end
 
@@ -127,7 +127,7 @@ function devfs.open(path, mode)
 
     local handle = next_handle
     next_handle = next_handle + 1
-    handles[tostring(handle)] = { driver = entry.driver, mode = mode or "r" }
+    handles[tostring(handle)] = { ops = entry.ops, mode = mode or "r" }
 
     return handle
 end
@@ -137,8 +137,8 @@ function devfs.read(handle, ...)
     if not h then return nil, "Bad file descriptor" end
     if not h.mode:find("r") then return nil, "File not open for reading" end
 
-    if h.driver.read then
-        return h.driver.read(handle, ...)
+    if h.ops.read then
+        return h.ops.read(handle, ...)
     end
     return nil, "Operation not supported"
 end
@@ -148,8 +148,8 @@ function devfs.write(handle, value)
     if not h then return nil, "Bad file descriptor" end
     if not h.mode:find("w") and not h.mode:find("a") then return nil, "File not open for writing" end
 
-    if h.driver.write then
-        return h.driver.write(handle, value)
+    if h.ops.write then
+        return h.ops.write(handle, value)
     end
     return false, "Device not writable"
 end
@@ -158,8 +158,8 @@ function devfs.seek(handle, whence, offset)
     local h = handles[tostring(handle)]
     if not h then return nil, "Bad file descriptor" end
 
-    if h.driver.seek then
-        return h.driver.seek(handle, whence, offset)
+    if h.ops.seek then
+        return h.ops.seek(handle, whence, offset)
     end
     return 0
 end
@@ -167,8 +167,8 @@ end
 function devfs.close(handle)
     local h = handles[tostring(handle)]
     if h then
-        if h.driver.close then
-            h.driver.close(handle)
+        if h.ops.close then
+            h.ops.close(handle)
         end
         handles[tostring(handle)] = nil
     end

@@ -3,7 +3,7 @@
 -- modules ("module" tier). Neither tier can reach the raw OC APIs or kernel
 -- objects that hold them (vnodes, process entries): every kernel API is handed
 -- out read-only (metatables locked), and `component`/`computer` come from the
--- driver layer.
+-- policy layer.
 
 ---@param tbl table
 ---@param name string
@@ -162,7 +162,7 @@ end
 ------------------------------------------------------------
 
 local function newApis(tier)
-    local component, computer = driver.libraries(tier)
+    local component, computer = policy.libraries(tier)
     local devfsapi = { exists = devfs.exists, list = devfs.list, isDirectory = devfs.isDirectory }
     local systemapi = functions(system, {
         _syncMetadata = true,
@@ -172,8 +172,8 @@ local function newApis(tier)
     systemapi.config = lock(util.copyTable(system.config), "system.config")
     if tier == "module" then
         systemapi.console = system.console
-        function devfsapi.create(name, drv, block, perm)
-            local ok, e = devfs.create(name, drv, block, perm)
+        function devfsapi.create(name, ops, block, perm)
+            local ok, e = devfs.create(name, ops, block, perm)
             return ok, e
         end
     end

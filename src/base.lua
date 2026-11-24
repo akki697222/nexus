@@ -1,7 +1,7 @@
 -- Capture the raw OpenComputers APIs as kernel-private upvalues. Every source
 -- file is concatenated into this one chunk, so all kernel code below resolves
 -- `component`/`computer` to these locals. main.lua scrubs the globals before
--- any userland code runs; only driver.lua touches `component` directly.
+-- any userland code runs; only policy.lua touches `component` directly.
 local component, computer = component, computer
 
 log_buffer = setmetatable({}, {

@@ -164,7 +164,7 @@ function device.list()
     for id, entry in pairs(system_devices) do
         result[id] = util.copyTable(entry)
         -- Device names are identifiers only. The snapshot never exposes the
-        -- internal map or the devfs driver object.
+        -- internal map or the devfs ops table.
         result[id].node = deviceNodes[id]
     end
     return result

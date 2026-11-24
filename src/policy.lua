@@ -1,34 +1,34 @@
--- component driver layer
+-- component policy layer
 -- Builds the wrapped `component` / `computer` libraries handed to userland
 -- and kernel modules through their env. Neither ever receives a raw OC proxy
 -- or the raw libraries: every method is a closure that checks the caller's
 -- tier ("user" or "module") against a per-component-type policy.
 -- Only boot code (init.lua, kernel.lua) uses the raw OC APIs.
 
----@class driver
-driver = {}
+---@class policy
+policy = {}
 
----@alias driver_policy
+---@alias policy_rule
 ---| '"all"'    # callable from any tier by anyone
 ---| '"root"'   # userland: euid 0 only; modules: allowed
 ---| '"module"' # kernel modules only
 
----@class driver_def
----@field methods table<string, driver_policy>
----@field default? driver_policy policy for unlisted methods (nil = not exported)
+---@class policy_def
+---@field methods table<string, policy_rule>
+---@field default? policy_rule policy for unlisted methods (nil = not exported)
 
----@type table<string, driver_def>
+---@type table<string, policy_def>
 local defs = {}
 
 ---@param ctype string
----@param def driver_def
-function driver.register(ctype, def)
+---@param def policy_def
+function policy.register(ctype, def)
     defs[ctype] = def
 end
 
 -- Filesystem contents are reachable only through the VFS (which enforces
 -- permissions and hides .meta), so file I/O is never exported to any tier.
-driver.register("filesystem", {
+policy.register("filesystem", {
     methods = {
         getLabel = "all",
         isReadOnly = "all",
@@ -38,13 +38,13 @@ driver.register("filesystem", {
     },
 })
 
-driver.register("debug", { methods = {}, default = "root" })
+policy.register("debug", { methods = {}, default = "root" })
 
 -- The boot ROM can be rewritten through this.
-driver.register("eeprom", { methods = {}, default = "root" })
+policy.register("eeprom", { methods = {}, default = "root" })
 
 -- The console (tty/vt modules) owns the GPU and screen; userland may query them.
-driver.register("gpu", {
+policy.register("gpu", {
     methods = {
         getResolution = "all",
         maxResolution = "all",
@@ -55,21 +55,21 @@ driver.register("gpu", {
     },
     default = "module",
 })
-driver.register("screen", {
+policy.register("screen", {
     methods = { getAspectRatio = "all", getKeyboards = "all", isOn = "all" },
     default = "root",
 })
 
 -- Sound output is an ordinary user facility: the OCCE audio card ("audio")
 -- and the sound card ("sound") are usable by every process.
-driver.register("audio", { methods = {}, default = "all" })
-driver.register("sound", { methods = {}, default = "all" })
+policy.register("audio", { methods = {}, default = "all" })
+policy.register("sound", { methods = {}, default = "all" })
 
 -- fallback for component types without a dedicated definition
 local generic = { methods = {}, default = "root" }
 
 ---@param tier '"user"'|'"module"'
----@param policy driver_policy|nil
+---@param policy policy_rule|nil
 ---@return boolean exported, boolean needsRoot
 local function evaluate(tier, policy)
     if not policy then return false, false end
@@ -201,7 +201,7 @@ local function newComponentLib(tier)
     return readonly(lib, "component")
 end
 
----@type table<string, driver_policy>
+---@type table<string, policy_rule>
 local computerPolicy = {
     address = "all",
     tmpAddress = "all",
@@ -254,7 +254,7 @@ local libs = {}
 
 ---@param tier '"user"'|'"module"'
 ---@return table component, table computer
-function driver.libraries(tier)
+function policy.libraries(tier)
     assert(tier == "user" or tier == "module", "bad tier")
     local l = libs[tier]
     if not l then
