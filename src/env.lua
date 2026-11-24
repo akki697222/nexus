@@ -274,8 +274,11 @@ end
 local function newBaseEnv(tier)
     local apis = newApis(tier)
     local base = {
-        debug = debug,
         coroutine = coroutine,
+        -- Only .traceback is exposed; OC's debug also has getupvalue,
+        -- getinfo and getlocal, which are dropped here -- see the comment
+        -- at the top of newEnv (NV-2026-001 / NX-17).
+        debug = { traceback = debug.traceback },
         io = io,
         math = math,
         os = os,
@@ -300,7 +303,6 @@ local function newBaseEnv(tier)
         rawequal = rawequal,
         rawget = rawget,
         rawlen = rawlen,
-        rawset = rawset,
         select = select,
         tonumber = tonumber,
         tostring = tostring,
@@ -320,6 +322,30 @@ local baseEnvs = {}
 
 ---@param tier '"user"'|'"module"'
 ---@return table
+-- NV-2026-001 / NX-17: process.getCurrent() (and the rest of `apis`: user,
+-- filesystem, ...) is a single table shared by every process of this tier,
+-- built once and cached below. Reusing it is safe, and cheap, as long as it
+-- really is read-only to the code it's handed to:
+--   - lock() below makes ordinary writes (api.x = y) error. That alone is
+--     not enough: Lua's rawset() plants a key directly on the proxy table,
+--     bypassing __newindex entirely and shadowing __index for every other
+--     reader of that *same table* from then on -- including an unrelated,
+--     later-exec'd setuid-root process such as sudo.lua, since it reads the
+--     identical cached object. This is why `rawset` (along with the rest of
+--     the raw* family that can reach a shared table) is not in the globals
+--     below: with no way to call it, lock()'s __newindex guard holds.
+--   - OpenComputers' debug library has no setmetatable/setupvalue/setlocal,
+--     so it can't rewrite a locked proxy the way rawset could. But
+--     debug.getupvalue can still read a closure's upvalues, and every
+--     api.* closure here (e.g. api.getCurrent above) closes over the real,
+--     un-lock()'d kernel module table (`process`, not a proxy of it) --
+--     reading that reference out and assigning to it directly (no rawset
+--     needed; it has no __newindex guard at all) would corrupt the one
+--     real kernel object, worse than corrupting the proxy. debug is cut
+--     down to just .traceback, dropping getupvalue/getinfo/getlocal, for
+--     exactly this reason: see newBaseEnv.
+-- If either restriction is ever loosened, this table must go back to being
+-- built fresh per process (see git history) rather than shared again.
 local function newEnv(tier)
     local entry = baseEnvs[tier]
     if not entry then
