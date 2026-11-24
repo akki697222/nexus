@@ -24,7 +24,7 @@ local files = {
         return driver
     ]] },
     { name = "badmode", source = [[ return { info = { match = { "x" }, node = "x", mode = 680 }, attach = function() end } ]] },
-    { name = "badaccess", source = [[ return { info = { match = { "y" }, node = "y", access = { op = "rw" } }, attach = function() end } ]] },
+    { name = "badaccess", source = [[ return { info = { match = { "y" }, node = "y", access = { op = "rx" } }, attach = function() end } ]] },
     { name = "noattach", source = [[ return { info = { match = { "z" } } } ]] },
     { name = "noinfo", source = [[ return { attach = function() end } ]] },
     { name = "throws", source = [[ error("boom") ]] },

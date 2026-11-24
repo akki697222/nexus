@@ -558,7 +558,7 @@ function device.open(path, mode)
     local impl = slot.drv.ops or {}
     for op, need in pairs(entry.access or {}) do
         local f = impl[op]
-        local permitted = (need == "r" and wantR) or (need == "w" and wantW) or (need == "root" and isRoot)
+        local permitted = (need == "r" and wantR) or (need == "w" and wantW) or (need == "root" and isRoot) or (need == "rw" and wantR and wantW)
         if type(f) == "function" and permitted then
             ops[op] = function(...)
                 if not state.valid then return nil, "device removed" end

@@ -36,7 +36,7 @@ depmod.CLASSES = {
     network = true, audio = true,
 }
 
-local ACCESS = { r = true, w = true, root = true }
+local ACCESS = { r = true, w = true, rw = true, root = true }
 
 -- A value that absorbs any use, for driver top-level code that touches its
 -- declared modules while depmod evaluates it.
@@ -131,11 +131,11 @@ function depmod.check(name, info, warn)
     end
     if info.access ~= nil then
         if type(info.access) ~= "table" then
-            bad("info.access must map op names to \"r\", \"w\" or \"root\"")
+            bad("info.access must map op names to \"r\", \"w\", \"rw\" or \"root\"")
         else
             for op, need in pairs(info.access) do
                 if type(op) ~= "string" or not ACCESS[need] then
-                    bad("info.access." .. tostring(op) .. " must be \"r\", \"w\" or \"root\"")
+                    bad("info.access." .. tostring(op) .. " must be \"r\", \"w\", \"rw\" or \"root\"")
                 end
             end
         end
