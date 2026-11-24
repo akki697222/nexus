@@ -7,9 +7,9 @@ local config = {
     -- Kernel
     kernel_panic_bsod = false;
     kernel_version = {
-        id = "Nexus 0.0.6-dev-oc";
+        id = "Nexus 0.0.7-dev-oc";
         name = "Nexus";
-        ver = "0.0.6-dev-oc";
+        ver = "0.0.7-dev-oc";
         dist = "Nexus";
     };
     -- Console

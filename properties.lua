@@ -3,7 +3,7 @@ local properties = {}
 -- build settings
 properties.buildDir = "build"
 properties.buildOutput = "kernel.lua"
-properties.buildVersion = "0.0.6"
+properties.buildVersion = "0.0.7"
 -- include settings
 properties.includeDir = "src"
 properties.includes = {

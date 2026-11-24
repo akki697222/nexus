@@ -36,9 +36,9 @@ end
 loadfile = function(file, env) end
 
 version = {
-    id = "Nexus 0.0.6-dev-oc";
+    id = "Nexus 0.0.7-dev-oc";
     name = "Nexus";
-    ver = "0.0.6-dev-oc";
+    ver = "0.0.7-dev-oc";
     dist = "Nexus";
 };
 
