@@ -341,8 +341,20 @@ function tty_driver:push(token)
     process.wakeIO(self.channel)
 end
 
+-- config.tty_debug: one debug line in dmesg per key signal and per token
+-- a reader takes, with the uptime, for tracing input delays.
+local function trace(fmt, ...)
+    if system.config and system.config.tty_debug then
+        system.printk(string.format("tty: %.2f " .. fmt, computer.uptime(), ...), "debug")
+    end
+end
+
 -- A signal from the keyboard (kernel context).
 function tty_driver:signal(name, _, char, key)
+    if name == "key_down" or name == "key_up" then
+        trace("%s key=%s char=%s%s", name, tostring(key), tostring(char),
+            (name == "key_down" and key and self.keys[key]) and " (held: ignored)" or "")
+    end
     if name == "key_down" then
         if not key then return end
         local now = computer.uptime()
@@ -405,13 +417,17 @@ function tty_driver:tickRepeat(now)
     for _ = 1, math.min(n, REPEAT_BURST) do
         self:push({ char = held.char, key = held.key })
     end
+    trace("repeat key=%s x%d", tostring(held.key), math.min(n, REPEAT_BURST))
 end
 
 -- Next queued token, blocking until there is one.
 function tty_driver:nextToken()
     while true do
         local token = table.remove(self.queue, 1)
-        if token then return token end
+        if token then
+            trace("take key=%s char=%s", tostring(token.key), tostring(token.char))
+            return token
+        end
         self.device:setInputCursor(self.in_pid)
         process.blockIO(self.channel)
     end

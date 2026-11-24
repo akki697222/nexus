@@ -20,6 +20,8 @@ local config = {
     -- held keys: seconds before repeating, then repeats per second
     key_repeat_delay = 0.35;
     key_repeat_rate = 30;
+    -- log every key signal and input token to dmesg (debug), with uptime
+    tty_debug = false;
     -- every 2s of activity, log kernel loop statistics to dmesg (debug)
     loop_stats = false;
     -- Filesystem
