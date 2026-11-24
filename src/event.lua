@@ -28,7 +28,8 @@ local interactive_events = {
     drag = true,
     drop = true,
     scroll = true,
-    clipboard = true
+    clipboard = true,
+    text_input = true
 }
 
 -- Deadline of each coroutine blocked in an event wait (weak keys).

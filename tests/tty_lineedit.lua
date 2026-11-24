@@ -4,9 +4,10 @@ local driverPath = "root/usr/lib/modules/system/kernel/drivers/tty/"
 local W, H = 20, 6
 local frames = { [0] = {}, [1] = {} }
 local active, fgc, bgc = 0, 0xFFFFFF, 0
+local bufferColors = {}
 local function key(x, y) return x .. ":" .. y end
 local gpu = {
-    freeAllBuffers = function() frames[1] = {} end,
+    freeAllBuffers = function() frames[1] = {}; bufferColors[1] = nil end,
     allocateBuffer = function() return 1 end,
     maxResolution = function() return W, H end,
     setResolution = function() end,
@@ -15,7 +16,13 @@ local gpu = {
     getBackground = function() return bgc, false end,
     setBackground = function(c) bgc = c end,
     getActiveBuffer = function() return active end,
-    setActiveBuffer = function(b) active = b end,
+    -- colors belong to the active buffer, as in OpenComputers
+    setActiveBuffer = function(b)
+        bufferColors[active] = { fgc, bgc }
+        active = b
+        local c = bufferColors[b] or { 0xFFFFFF, 0 }
+        fgc, bgc = c[1], c[2]
+    end,
     set = function(x, y, text)
         for i = 1, #text do frames[active][key(x + i - 1, y)] = { text:sub(i, i), bgc } end
     end,

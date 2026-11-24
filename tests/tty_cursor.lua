@@ -3,13 +3,14 @@ local driverPath = "root/usr/lib/modules/system/kernel/drivers/tty/"
 local now, foreground = 0, -1
 local owner = { instance = 10 }
 local active, background = 0, 0
+local bufferBackgrounds = {}
 local frames = { [0] = {}, [1] = {} }
 local fullFrames = 0
 local repaint
 
 local function key(x, y) return x .. ":" .. y end
 local gpu = {
-    freeAllBuffers = function() frames[1] = {} end,
+    freeAllBuffers = function() frames[1] = {}; bufferBackgrounds[1] = nil end,
     allocateBuffer = function() return 1 end,
     maxResolution = function() return 20, 5 end,
     setResolution = function() end,
@@ -18,7 +19,12 @@ local gpu = {
     getBackground = function() return background, false end,
     setBackground = function(color) background = color end,
     getActiveBuffer = function() return active end,
-    setActiveBuffer = function(buffer) active = buffer end,
+    -- colors belong to the active buffer, as in OpenComputers
+    setActiveBuffer = function(buffer)
+        bufferBackgrounds[active] = background
+        active = buffer
+        background = bufferBackgrounds[buffer] or 0
+    end,
     -- like OC: the string is written horizontally, one cell per character
     set = function(x, y, text)
         for i = 1, #text do frames[active][key(x + i - 1, y)] = { text:sub(i, i), background } end

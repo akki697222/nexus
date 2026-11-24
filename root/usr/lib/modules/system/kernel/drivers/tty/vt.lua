@@ -19,31 +19,45 @@ local CURSOR_HALF_PERIOD = 0.5
 -- that would not change anything are skipped: every GPU call counts
 -- against the machine's per-tick call budget. Only the console modules
 -- change GPU state (userland may only query it, see policy.lua), and vts
--- sharing a GPU share its record.
+-- sharing a GPU share its record. OpenComputers keeps the colors per
+-- buffer (the screen and each video RAM buffer have their own), so they
+-- are recorded per buffer: a color set while drawing off screen says
+-- nothing about the screen's, and the other way round.
 local gpuStates = setmetatable({}, { __mode = "k" })
 
 local function gpuState(gpu)
     local st = gpuStates[gpu]
     if not st then
-        st = {}
+        st = { colors = {} }
         gpuStates[gpu] = st
     end
     return st
 end
 
+-- the color record of the active buffer (none while that is unknown)
+local function bufferColors(st)
+    if st.active == nil then return {} end
+    local c = st.colors[st.active]
+    if not c then
+        c = {}
+        st.colors[st.active] = c
+    end
+    return c
+end
+
 local function setFg(gpu, color)
-    local st = gpuState(gpu)
-    if st.fg ~= color then
+    local c = bufferColors(gpuState(gpu))
+    if c.fg ~= color then
         gpu.setForeground(color)
-        st.fg = color
+        c.fg = color
     end
 end
 
 local function setBg(gpu, color)
-    local st = gpuState(gpu)
-    if st.bg ~= color then
+    local c = bufferColors(gpuState(gpu))
+    if c.bg ~= color then
         gpu.setBackground(color)
-        st.bg = color
+        c.bg = color
     end
 end
 
@@ -58,7 +72,7 @@ end
 
 -- after freeAllBuffers / allocateBuffer the GPU draws on the screen again
 local function forgetGpuState(gpu)
-    gpuStates[gpu] = { active = 0 }
+    gpuStates[gpu] = { active = 0, colors = {} }
 end
 
 local ansi_colors = {
@@ -108,10 +122,55 @@ local vt_driver = {
 }
 vt_driver.__index = vt_driver
 
+-- A line holds one cell per screen column: cells[x] is the character drawn
+-- in column x. A double-width character (CJK, full-width forms) fills its
+-- column and the next one, whose cell is TAIL. Colors are per column too.
 ---@class self_lnbuf
----@field text string
+---@field cells string[]
 ---@field fg table<integer, integer>
 ---@field bg table<integer, integer>
+
+local TAIL = ""
+local unicodeLib = type(unicode) == "table" and unicode or nil
+
+local function wide_codepoint(cp)
+    return (cp >= 0x1100 and cp <= 0x115F) or (cp >= 0x2E80 and cp <= 0x303E)
+        or (cp >= 0x3041 and cp <= 0x33FF) or (cp >= 0x3400 and cp <= 0x4DBF)
+        or (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0xA000 and cp <= 0xA4CF)
+        or (cp >= 0xAC00 and cp <= 0xD7A3) or (cp >= 0xF900 and cp <= 0xFAFF)
+        or (cp >= 0xFE30 and cp <= 0xFE4F) or (cp >= 0xFF00 and cp <= 0xFF60)
+        or (cp >= 0xFFE0 and cp <= 0xFFE6) or (cp >= 0x20000 and cp <= 0x3FFFD)
+end
+
+-- Screen columns one character takes: OpenComputers' own measure when it
+-- is there (it decides how gpu.set draws), East Asian wide ranges if not.
+local function char_width(ch)
+    if #ch <= 1 then return 1 end
+    if unicodeLib and unicodeLib.charWidth then
+        local ok, w = pcall(unicodeLib.charWidth, ch)
+        if ok and type(w) == "number" then return w >= 2 and 2 or 1 end
+    end
+    local ok, cp = pcall(utf8.codepoint, ch)
+    if ok and cp and wide_codepoint(cp) then return 2 end
+    return 1
+end
+
+-- The UTF-8 character starting at byte i (a stray byte on its own).
+local function char_at(s, i)
+    return s:match("^[\194-\244][\128-\191]+", i) or s:sub(i, i)
+end
+
+-- Cells of a line's text, as written to and read from the scrollback file.
+local function cells_of(text)
+    local cells, i = {}, 1
+    while i <= #text do
+        local ch = char_at(text, i)
+        cells[#cells + 1] = ch
+        if char_width(ch) == 2 then cells[#cells + 1] = TAIL end
+        i = i + #ch
+    end
+    return cells
+end
 
 local function hex6(n)
     if not n then return "000000" end
@@ -120,12 +179,13 @@ local function hex6(n)
 end
 
 local function serialize_line(line)
-    local text = line.text or ""
+    local cells = line.cells or {}
+    local text = table.concat(cells)
     local text_len = #text
 
     local runs = {}
     local last_fg, last_bg, run_start, run_len = nil, nil, nil, 0
-    for i = 1, text_len do
+    for i = 1, #cells do
         local fg = line.fg and line.fg[i] or nil
         local bg = line.bg and line.bg[i] or nil
         fg = fg or 0xFFFFFF
@@ -168,7 +228,7 @@ local function parse_line_from_data(data)
 
     local sep_pos = text_end + 1
     if data:sub(sep_pos, sep_pos) ~= "|" then
-        return { text = text, fg = {}, bg = {} }
+        return { cells = cells_of(text), fg = {}, bg = {} }
     end
     local runs_str = data:sub(sep_pos + 1)
     if runs_str:sub(-1) == "\n" then runs_str = runs_str:sub(1, -2) end
@@ -186,7 +246,7 @@ local function parse_line_from_data(data)
         end
     end
 
-    return { text = text, fg = fg, bg = bg }
+    return { cells = cells_of(text), fg = fg, bg = bg }
 end
 
 local function append_line_to_file(self, str)
@@ -224,7 +284,7 @@ function vt_driver:init()
 
     self.scscroll = 0
     self.line_positions = {}
-    self.buf = { { text = "", fg = {}, bg = {} } }
+    self.buf = { { cells = {}, fg = {}, bg = {} } }
     self.cx, self.cy = 1, 1
 
     local gpu = self.gpu
@@ -251,7 +311,7 @@ function vt_driver:reset()
     if not gpu then return end
 
     self.line_positions = {}
-    self.buf = { { text = "", fg = {}, bg = {} } }
+    self.buf = { { cells = {}, fg = {}, bg = {} } }
     self.cx, self.cy = 1, 1
     self.scscroll = 0
     self:invalidate()
@@ -272,11 +332,23 @@ function vt_driver:reset()
     gpu.fill(1, 1, self.width, self.height, " ")
 end
 
+-- Forgets the scrollback (the lines already written to /tmp/vtbuf stay in
+-- the file, which other vts share).
+function vt_driver:dropScrollback()
+    self.line_positions = {}
+    self.scscroll = 0
+    self.scrollCache, self.scrollCacheSize = nil, 0
+end
+
+-- clear(1): an empty screen with the cursor at the top, and no scrollback
+-- above it (as `clear` does with ESC[3J), so nothing old comes back into
+-- view.
 function vt_driver:clear()
     local gpu = self.gpu
     if not gpu then return end
-    
-    self.buf = { { text = "", fg = {}, bg = {} } }
+
+    self.buf = { { cells = {}, fg = {}, bg = {} } }
+    if not self.alt then self:dropScrollback() end
     self.cx, self.cy = 1, 1
     self.scscroll = 0
     self:invalidate()
@@ -294,7 +366,9 @@ function vt_driver:read(n) return "" end
 -- write (fixed: use table.insert-style sequence, avoid holes)
 -- ============================================================
 
-local function new_line() return { text = "", fg = {}, bg = {} } end
+local function new_line() return { cells = {}, fg = {}, bg = {} } end
+
+function vt_driver:charWidth(ch) return char_width(ch) end
 
 -- Screen row (1-based) of the current view -> index into self.buf, growing
 -- the buffer when the row is below its last line.
@@ -309,33 +383,37 @@ function vt_driver:rowToLine(row)
 end
 
 -- Writes one character at the cursor, overwriting what is there (padding
--- with blanks past the end of the line), then advances the cursor.
+-- with blanks past the end of the line), then advances the cursor. A
+-- double-width character that does not fit in the row moves to the next.
 function vt_driver:putChar(c)
     if not self.buf[self.cy] then
         while #self.buf < self.cy do table.insert(self.buf, new_line()) end
     end
     local line = self.buf[self.cy]
-    local text = line.text or ""
+    local w = char_width(c)
     local cx = self.cx
-    if cx > self.width then
+    if cx + w - 1 > self.width then
         if self.alt then return end -- no autowrap on the alternate screen
         self.cx, cx = 1, 1
         table.insert(self.buf, self.cy + 1, new_line())
         self.cy = self.cy + 1
-        line, text = self.buf[self.cy], ""
+        line = self.buf[self.cy]
     end
-    if cx <= #text then
-        text = text:sub(1, cx - 1) .. c .. text:sub(cx + 1)
-    else
-        for i = #text + 1, cx - 1 do
-            line.fg[i], line.bg[i] = 0xFFFFFF, 0x000000
-        end
-        text = text .. string.rep(" ", cx - 1 - #text) .. c
+    local cells = line.cells
+    for i = #cells + 1, cx - 1 do
+        cells[i] = " "
+        line.fg[i], line.bg[i] = 0xFFFFFF, 0x000000
     end
-    line.text = text
-    line.fg[cx] = self.fg
-    line.bg[cx] = self.bg
-    self.cx = cx + 1
+    -- a double-width character partly overwritten loses its other half
+    if cells[cx] == TAIL and cx > 1 then cells[cx - 1] = " " end
+    if cells[cx + w] == TAIL then cells[cx + w] = " " end
+    cells[cx] = c
+    line.fg[cx], line.bg[cx] = self.fg, self.bg
+    if w == 2 then
+        cells[cx + 1] = TAIL
+        line.fg[cx + 1], line.bg[cx + 1] = self.fg, self.bg
+    end
+    self.cx = cx + w
     if self.cx > self.width and not self.alt then
         self.cx = 1
         table.insert(self.buf, self.cy + 1, new_line())
@@ -379,18 +457,24 @@ function vt_driver:csi(seq, final)
     elseif final == "K" then
         local line = self.buf[self.cy]
         if line and (seq == "" or seq == "0") then
-            line.text = line.text:sub(1, self.cx - 1)
+            local cells = line.cells
+            if cells[self.cx] == TAIL and self.cx > 1 then cells[self.cx - 1] = " " end
+            for i = #cells, self.cx, -1 do cells[i] = nil end
             for i = self.cx, #line.fg do line.fg[i], line.bg[i] = nil, nil end
         elseif line and seq == "2" then
             self.buf[self.cy] = new_line()
         end
-    elseif final == "J" and (seq == "2" or seq == "3") then
-        if self.alt then
-            self.buf = {}
-            for _ = 1, self.height do table.insert(self.buf, new_line()) end
-        else
-            self.buf = { new_line() }
+    elseif final == "J" and seq == "3" then
+        -- erase the saved lines; the screen stays as it is
+        if not self.alt then
+            self:dropScrollback()
+            self:invalidate()
         end
+    elseif final == "J" and seq == "2" then
+        -- erase the screen: a screenful of blank lines, so the view shows
+        -- them and not the scrollback above (which is kept)
+        self.buf = {}
+        for _ = 1, self.height do table.insert(self.buf, new_line()) end
         self.cx, self.cy = 1, 1
         self:invalidate()
     elseif final == "h" and seq == "?1049" and not self.alt then
@@ -451,8 +535,9 @@ function vt_driver:write(...)
             for _ = 1, space do self:putChar(" ") end
             i = i + 1
         else
-            self:putChar(c)
-            i = i + 1
+            local ch = char_at(text, i)
+            self:putChar(ch)
+            i = i + #ch
         end
     end
 
@@ -511,7 +596,7 @@ function vt_driver:updateCursor()
     if previous and previous.x == x and previous.y == y then return end
     if previous then
         -- The off-screen frame still has the original text and colors.
-        gpu.bitblt(0, previous.x, previous.y, 1, 1, self.buf_n, previous.x, previous.y)
+        gpu.bitblt(0, previous.x, previous.y, previous.w or 1, 1, self.buf_n, previous.x, previous.y)
         self.cursorOverlay = nil
     end
     if not x then return end
@@ -519,23 +604,25 @@ function vt_driver:updateCursor()
     setActive(gpu, 0)
     -- block cursor: the character under it in inverted colors
     local line = self.buf[self.cy]
-    local ch = line and line.text:sub(self.cx, self.cx) or ""
+    local ch = line and line.cells[self.cx] or ""
     if ch == "" then ch = " " end
+    local cw = math.min(char_width(ch), self.width - x + 1)
     local cellFg = line and line.fg[self.cx] or self.fg
     local cellBg = line and line.bg[self.cx] or 0x000000
     if ch == " " then cellFg = self.fg end
     setFg(gpu, cellBg)
     setBg(gpu, cellFg)
     gpu.set(x, y, ch)
-    self.cursorOverlay = { x = x, y = y }
+    self.cursorOverlay = { x = x, y = y, w = cw }
 end
 
--- Color runs of a line: { x, text, fg, bg } per stretch of equal colors,
--- plus a signature that identifies what the row looks like once drawn.
+-- Color runs of a line: { x, text, fg, bg, columns } per stretch of equal
+-- colors, plus a signature that identifies what the row looks like once
+-- drawn. A double-width character is never split between runs.
 local function line_runs(line, width)
     local runs, sig = {}, {}
-    local text = line and line.text or ""
-    local n = math.min(#text, width)
+    local cells = line and line.cells or {}
+    local n = math.min(#cells, width)
     local fgs, bgs = line and line.fg, line and line.bg
     local x = 1
     while x <= n do
@@ -545,11 +632,11 @@ local function line_runs(line, width)
         while e < n do
             local nfg = fgs and fgs[e + 1] or 0xFFFFFF
             local nbg = bgs and bgs[e + 1] or 0x000000
-            if nfg ~= fg or nbg ~= bg then break end
+            if (nfg ~= fg or nbg ~= bg) and cells[e + 1] ~= TAIL then break end
             e = e + 1
         end
-        local piece = text:sub(x, e)
-        runs[#runs + 1] = { x, piece, fg, bg }
+        local piece = table.concat(cells, "", x, e)
+        runs[#runs + 1] = { x, piece, fg, bg, e - x + 1 }
         sig[#sig + 1] = x .. ":" .. fg .. ":" .. bg .. ":" .. piece
         x = e + 1
     end
@@ -662,11 +749,25 @@ function vt_driver:update()
             if logical_line_idx <= offset then
                 local entry = self.line_positions[logical_line_idx]
                 if entry then
-                    f = f or fs.open("/tmp/vtbuf", "r") or false
-                    if f then
-                        f:seek("set", entry.pos)
-                        local data = f:read(entry.len)
-                        if data then line = parse_line_from_data(data) end
+                    -- scrollback rows come from the file once, then from
+                    -- the cache: repaints happen on every keystroke
+                    local cache = self.scrollCache
+                    if not cache or (self.scrollCacheSize or 0) > 4 * height then
+                        cache = {}
+                        self.scrollCache, self.scrollCacheSize = cache, 0
+                    end
+                    line = cache[entry.pos]
+                    if not line then
+                        f = f or fs.open("/tmp/vtbuf", "r") or false
+                        if f then
+                            f:seek("set", entry.pos)
+                            local data = f:read(entry.len)
+                            if data then line = parse_line_from_data(data) end
+                        end
+                        if line then
+                            cache[entry.pos] = line
+                            self.scrollCacheSize = self.scrollCacheSize + 1
+                        end
                     end
                 end
             else
@@ -682,7 +783,7 @@ function vt_driver:update()
             if not fullClear then
                 -- only the part the runs leave uncovered needs clearing
                 local last = runs[#runs]
-                local covered = last and (last[1] + #last[2] - 1) or 0
+                local covered = last and (last[1] + last[5] - 1) or 0
                 if covered < width then
                     setBg(gpu, 0x000000)
                     gpu.fill(covered + 1, sy, width - covered, 1, " ")
@@ -755,14 +856,18 @@ function vt_driver:backspace(n)
             local line = self.buf[self.cy]
 
             if line then
-                local pre = string.sub(line.text, 1, self.cx - amount - 1)
-                local post = string.sub(line.text, self.cx)
-                line.text = pre .. post
-
+                local cells = line.cells
                 local start_del = self.cx - amount
                 for _ = 1, amount do
+                    if start_del <= #cells then table.remove(cells, start_del) end
                     table.remove(line.fg, start_del)
                     table.remove(line.bg, start_del)
+                end
+                -- no half of a double-width character survives on its own
+                if cells[start_del] == TAIL then cells[start_del] = " " end
+                local before = cells[start_del - 1]
+                if before and char_width(before) == 2 and cells[start_del] ~= TAIL then
+                    cells[start_del - 1] = " "
                 end
             end
 
@@ -772,12 +877,13 @@ function vt_driver:backspace(n)
             local curr_line = self.buf[self.cy]
             local prev_line = self.buf[self.cy - 1]
 
-            local prev_len = #(prev_line.text or "")
+            local prev_len = #prev_line.cells
             self.cx = prev_len + 1
 
-            prev_line.text = (prev_line.text or "") .. (curr_line.text or "")
-
-            local curr_len = #(curr_line.text or "")
+            local curr_len = #curr_line.cells
+            for i = 1, curr_len do
+                prev_line.cells[prev_len + i] = curr_line.cells[i]
+            end
             for i = 1, curr_len do
                 local dest_idx = prev_len + i
                 prev_line.fg[dest_idx] = curr_line.fg[i]
@@ -826,7 +932,7 @@ function vt.new(id)
             return true
         end,
     }
-    devfs.create("ttyv" .. tostring(id), callbacks)
+    devfs.create("ttyv" .. tostring(id), callbacks, false, 620)
     table.insert(vts, {dev = dev, id = id})
     return dev
 end
@@ -859,6 +965,6 @@ return {
         name      = "vt",
         desc      = "virtual terminal driver",
         version_n = 1,
-        version   = "0.1.0-dev-OC"
+        version   = "0.1.0-OC"
     }
 }

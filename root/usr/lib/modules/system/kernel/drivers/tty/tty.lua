@@ -93,6 +93,18 @@ local REPEAT_BURST = 4
 -- Without OC repeat events for this long a held key is taken as released
 -- (its key_up was lost, for example when the window lost focus).
 local REPEAT_STALE = 1.0
+-- OpenComputers: Rebooted (and other ports on GLFW) also send the typed
+-- character as a separate text_input signal, and for keys it has no key
+-- code for (on a JIS keyboard: _ and |, the ro and yen keys) only that
+-- signal. Once one arrives, printable characters are taken from text_input
+-- alone and key_down is left with control and special keys; the OS repeats
+-- held characters through text_input then, so the tty does not.
+local textInputSeen = false
+
+local function printable(char)
+    return type(char) == "number" and char >= 32 and char ~= 127
+end
+
 -- Ctrl+C and Ctrl+D act once per press.
 local NO_REPEAT_CHARS = { [3] = true, [4] = true, [28] = true }
 -- Keys that signal the foreground process group (Unix ISIG): Ctrl+C is
@@ -109,8 +121,9 @@ local HISTORY_LIMIT = 200
 
 -- ------------------------------------------------------------
 -- Line editor. The input occupies the end of the VT buffer, starting at
--- column self.startx of the row where reading began; vt wraps it every
--- `width` columns, so positions follow from plain arithmetic.
+-- column self.startx of the row where reading began, and vt wraps it at
+-- the end of each row. The buffer is UTF-8: positions are byte offsets at
+-- character boundaries, and a character takes one or two columns.
 -- ------------------------------------------------------------
 
 function tty_driver:canEdit()
@@ -118,13 +131,76 @@ function tty_driver:canEdit()
     return dev and dev.buf and dev.width and dev.setCursor and not self.flags.disableWriteCharInput
 end
 
--- VT cursor position of input index p (0 = before the first character).
+-- Byte offset of the character boundary before / after offset p.
+local function prevBoundary(s, p)
+    if p <= 0 then return 0 end
+    p = p - 1
+    while p > 0 do
+        local b = s:byte(p + 1)
+        if b < 0x80 or b >= 0xC0 then break end
+        p = p - 1
+    end
+    return p
+end
+
+local function nextBoundary(s, p)
+    if p >= #s then return #s end
+    p = p + 1
+    while p < #s do
+        local b = s:byte(p + 1)
+        if b < 0x80 or b >= 0xC0 then break end
+        p = p + 1
+    end
+    return p
+end
+
+function tty_driver:charWidth(ch)
+    local dev = self.device
+    if dev and dev.charWidth then return dev:charWidth(ch) end
+    return 1
+end
+
+-- Columns `text` takes on screen as the input shows it.
+function tty_driver:textWidth(text)
+    local mask = self.editMask
+    local total, i = 0, 0
+    while i < #text do
+        local j = nextBoundary(text, i)
+        total = total + self:charWidth(mask or text:sub(i + 1, j))
+        i = j
+    end
+    return total
+end
+
+-- Lays the input out the way vt draws it: a character that does not fit
+-- in the rest of the row (a double-width one at the last column) starts
+-- the next row, and a full row moves on to the next at once. Returns the
+-- column (0-based) and row (from the input's first row) of the character
+-- at byte offset p, the row of the end, and the columns the input takes.
+function tty_driver:layout(p)
+    local w = self.device.width
+    local buffer, mask = self.buffer, self.editMask
+    local col, row, cells = self.startx - 1, 0, 0
+    local pcol, prow
+    local i = 0
+    while i < #buffer do
+        local j = nextBoundary(buffer, i)
+        local cw = self:charWidth(mask or buffer:sub(i + 1, j))
+        if col + cw > w then row, col = row + 1, 0 end
+        if i == p then pcol, prow = col, row end
+        col, cells = col + cw, cells + cw
+        if col >= w then row, col = row + 1, 0 end
+        i = j
+    end
+    if not pcol then pcol, prow = col, row end
+    return pcol, prow, row, cells
+end
+
+-- VT cursor position of input offset p (0 = before the first character).
 function tty_driver:inputPosition(p)
     local dev = self.device
-    local w = dev.width
-    local endOff = self.startx - 1 + #self.buffer
-    local off = self.startx - 1 + p
-    return off % w + 1, #dev.buf - (endOff // w - off // w)
+    local col, row, endRow = self:layout(p)
+    return col + 1, #dev.buf - (endRow - row)
 end
 
 function tty_driver:placeCursor()
@@ -138,7 +214,7 @@ function tty_driver:toInputEnd()
 end
 
 local function shown(text, mask)
-    return mask and string.rep(mask, #text) or text
+    return mask and string.rep(mask, utf8.len(text) or #text) or text
 end
 
 -- Replaces the input with `text` and puts the cursor at `pos`.
@@ -147,8 +223,9 @@ function tty_driver:setInput(text, pos, mask)
     local echo = self:canEdit()
     if echo then
         self:toInputEnd()
-        local wraps = (self.startx - 1 + #self.buffer) // dev.width
-        local erase = #self.buffer + wraps
+        -- every column, and one more to join each row to the one before
+        local _, _, rows, cells = self:layout(#self.buffer)
+        local erase = cells + rows
         if erase > 0 then dev:backspace(erase) end
     end
     self.buffer, self.pos = text, pos
@@ -262,13 +339,18 @@ function tty_driver:editKey(char, key, mask, hint)
     elseif char == 9 then
         self:complete(hint, mask)
     elseif char == 8 or key == KEY_BACK then
-        if pos > 0 then self:setInput(buffer:sub(1, pos - 1) .. buffer:sub(pos + 1), pos - 1, mask) end
+        if pos > 0 then
+            local p = prevBoundary(buffer, pos)
+            self:setInput(buffer:sub(1, p) .. buffer:sub(pos + 1), p, mask)
+        end
     elseif key == KEY_DELETE then
-        if pos < #buffer then self:setInput(buffer:sub(1, pos) .. buffer:sub(pos + 2), pos, mask) end
+        if pos < #buffer then
+            self:setInput(buffer:sub(1, pos) .. buffer:sub(nextBoundary(buffer, pos) + 1), pos, mask)
+        end
     elseif key == KEY_LEFT then
-        if pos > 0 then self.pos = pos - 1; self:placeCursor() end
+        if pos > 0 then self.pos = prevBoundary(buffer, pos); self:placeCursor() end
     elseif key == KEY_RIGHT then
-        if pos < #buffer then self.pos = pos + 1; self:placeCursor() end
+        if pos < #buffer then self.pos = nextBoundary(buffer, pos); self:placeCursor() end
     elseif key == KEY_HOME or char == 1 then
         self.pos = 0; self:placeCursor()
     elseif key == KEY_END or char == 5 then
@@ -286,6 +368,8 @@ function tty_driver:editKey(char, key, mask, hint)
         self:setInput(before .. buffer:sub(pos + 1), #before, mask)
     elseif char and char >= 32 and char <= 126 then
         self:insertText(string.char(char), mask)
+    elseif char and char >= 160 and char <= 0x10FFFF then
+        self:insertText(utf8.char(char), mask)
     end
     return true
 end
@@ -378,12 +462,18 @@ function tty_driver:signal(name, _, char, key)
             self.held = nil
             return
         end
+        if textInputSeen and printable(char) then
+            -- the character follows as text_input
+            self.held = nil
+            return
+        end
         if NO_REPEAT_CHARS[char] then
             self.held = nil
         else
             self.held = { key = key, char = char, due = now + repeatDelay(), seen = now }
         end
         self:push({ char = char, key = key })
+        if printable(char) then self.lastTyped = { char = char, at = now } end
     elseif name == "key_up" then
         if not key then return end
         self.keys[key] = nil
@@ -391,6 +481,19 @@ function tty_driver:signal(name, _, char, key)
         if held and held.key == key then self.held = nil end
     elseif name == "clipboard" then
         self:push({ paste = tostring(char or "") })
+    elseif name == "text_input" then
+        if type(char) ~= "string" or char == "" then return end
+        if not textInputSeen then
+            textInputSeen = true
+            -- the key_down just before may have carried this character
+            local last = self.lastTyped
+            self.lastTyped = nil
+            if self.held and printable(self.held.char) then self.held = nil end
+            local ok, code = pcall(utf8.codepoint, char, 1)
+            if last and ok and code == last.char and computer.uptime() - last.at < 0.5 then return end
+        end
+        if not self:ownsInput() then return end
+        self:push({ text = char })
     end
 end
 
@@ -450,6 +553,16 @@ function tty_driver:keyPress(char, key, canonical, mask, hint)
     end
 end
 
+-- Text from a text_input signal, as if its characters had been typed.
+function tty_driver:typeText(text, canonical, mask)
+    if canonical then
+        self:insertText((text:gsub("%c", "")), mask)
+    else
+        self.read_buffer = self.read_buffer .. text
+        self.reading = false
+    end
+end
+
 function tty_driver:paste(text, canonical, mask, hint)
     if canonical then
         -- paste into the line, up to the first line break
@@ -472,18 +585,21 @@ end
 -- Takes queued input until the current read has what it needs.
 function tty_driver:read_pump(mask, hint)
     self.reading = true
+    self.editMask = mask
     local canonical = self.flags.canonical and not self.rawRead
     if canonical and self:canEdit() then
         -- where the input starts: the cursor, minus what is already typed
         local w = self.device.width
         self.pos = #self.buffer
-        self.startx = (self.device.cx - 1 - #self.buffer) % w + 1
+        self.startx = (self.device.cx - 1 - self:textWidth(self.buffer)) % w + 1
     end
     self.device:setInputCursor(self.in_pid)
     while self.reading do
         local token = self:nextToken()
         if token.paste then
             self:paste(token.paste, canonical, mask, hint)
+        elseif token.text then
+            self:typeText(token.text, canonical, mask)
         else
             self:keyPress(token.char, token.key, canonical, mask, hint)
         end
@@ -702,7 +818,7 @@ function tty.new(id)
             return true
         end,
     }
-    devfs.create("tty" .. tostring(id), callbacks)
+    devfs.create("tty" .. tostring(id), callbacks, false, 620)
     ttys[id] = dev
     return dev
 end
@@ -797,6 +913,6 @@ return {
         name = "tty",
         desc = "tty driver",
         version_n = 1,
-        version = "0.1.0-dev-OC"
+        version = "0.1.0-OC"
     }
 }

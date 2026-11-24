@@ -5,9 +5,10 @@ local driverPath = "root/usr/lib/modules/system/kernel/drivers/tty/"
 local W, H = 20, 6
 local frames = { [0] = {}, [1] = {} }
 local active, fgc, bgc = 0, 0xFFFFFF, 0
+local bufferColors = {}
 local function key(x, y) return x .. ":" .. y end
 local gpu = {
-    freeAllBuffers = function() frames[1] = {} end,
+    freeAllBuffers = function() frames[1] = {}; bufferColors[1] = nil end,
     allocateBuffer = function() return 1 end,
     maxResolution = function() return W, H end,
     setResolution = function() end,
@@ -16,7 +17,13 @@ local gpu = {
     getBackground = function() return bgc, false end,
     setBackground = function(c) bgc = c end,
     getActiveBuffer = function() return active end,
-    setActiveBuffer = function(b) active = b end,
+    -- colors belong to the active buffer, as in OpenComputers
+    setActiveBuffer = function(b)
+        bufferColors[active] = { fgc, bgc }
+        active = b
+        local c = bufferColors[b] or { 0xFFFFFF, 0 }
+        fgc, bgc = c[1], c[2]
+    end,
     set = function(x, y, text)
         for i = 1, #text do frames[active][key(x + i - 1, y)] = { text:sub(i, i), bgc } end
     end,
@@ -241,6 +248,46 @@ tty.signal({ "key_down", "kb", ("z"):byte(), 44, n = 4 })
 assert(tokens() == "z")
 tty.signal({ "key_up", "kb", ("z"):byte(), 44, n = 4 })
 assert(tty.isKeyPressing(44) == false)
+clear()
+
+-- 11. text_input (OpenComputers: Rebooted). Keys it has a code for send
+-- key_down with the character and then text_input; keys it has none for
+-- (JIS _ and |) send text_input alone, or their character rides on a
+-- queued Shift key_down. Each character is typed exactly once.
+local function text(s) term:signal("text_input", "kb", s, "player") end
+local function texts()
+    local out = {}
+    for i, t in ipairs(term.queue) do
+        out[i] = t.text or t.paste or (t.char ~= 0 and string.char(t.char)) or ("k" .. t.key)
+    end
+    return table.concat(out, ",")
+end
+now = 40
+down(("a"):byte(), A); text("a"); up(("a"):byte(), A)
+assert(texts() == "a", "the first text_input after its key_down is not doubled: " .. texts())
+down(("b"):byte(), 48); text("b"); up(("b"):byte(), 48)
+assert(texts() == "a,b", texts())
+down(("_"):byte(), SHIFT); text("_"); up(0, SHIFT)
+down(0, SHIFT); text("|"); up(0, SHIFT)
+assert(texts() == "a,b,_,|", "characters without a key code: " .. texts())
+down(13, ENTER); up(13, ENTER)
+down(8, 14); up(8, 14)
+assert(texts() == "a,b,_,|,\r,\b", "control keys still come from key_down: " .. texts())
+clear()
+-- the OS repeats printable keys through text_input; the tty does not
+down(("c"):byte(), 46); text("c")
+tty.tick(41); text("c"); text("c")
+assert(texts() == "c,c,c", texts())
+up(("c"):byte(), 46)
+clear()
+-- a line read takes the typed text
+co = coroutine.create(function() return term:read("*l") end)
+assert(coroutine.resume(co))
+for ch in ("x_y|z"):gmatch(".") do text(ch) end
+down(13, ENTER)
+local _, line = coroutine.resume(co)
+up(13, ENTER)
+assert(line == "x_y|z", tostring(line))
 clear()
 
 print("tty input tests passed")
