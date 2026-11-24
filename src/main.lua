@@ -299,6 +299,25 @@ local function main()
         end
     end
 
+    -- Optional loop statistics (config.loop_stats = true): every 2 seconds
+    -- of activity, one debug line in klog (dmesg) with passes, game ticks,
+    -- signals and CPU time spent in processes and kernel threads.
+    local stats = config.loop_stats and {
+        since = computer.uptime(), passes = 0, ticks = 0, signals = 0, keys = 0,
+        maxPerTick = 0, inTick = 0, lastTick = nil, proc = 0, kthr = 0, cpu = os.clock(),
+    }
+    local function report(now)
+        local cpu = os.clock() - stats.cpu
+        if stats.signals > 0 then
+            printk(string.format(
+                "loop: %.1fs %d passes %d ticks, %d signals (%d keys, max %d/tick), cpu %dms (proc %dms kthr %dms)",
+                now - stats.since, stats.passes, stats.ticks, stats.signals, stats.keys, stats.maxPerTick,
+                cpu * 1000, stats.proc * 1000, stats.kthr * 1000), "debug")
+        end
+        stats.since, stats.passes, stats.ticks, stats.signals, stats.keys = now, 0, 0, 0, 0
+        stats.maxPerTick, stats.proc, stats.kthr, stats.cpu = 0, 0, 0, os.clock()
+    end
+
     -- kernel main event loop
     while true do
         -- Block for the next signal only when no process is ready to run;
@@ -310,14 +329,39 @@ local function main()
             event.dispatch(ev)
         end
 
+        local t0
+        if stats then
+            local now = computer.uptime()
+            stats.passes = stats.passes + 1
+            if now ~= stats.lastTick then
+                stats.ticks, stats.lastTick, stats.inTick = stats.ticks + 1, now, 0
+            end
+            if ev.n > 0 then
+                stats.signals = stats.signals + 1
+                if ev[1] == "key_down" or ev[1] == "key_up" then stats.keys = stats.keys + 1 end
+                stats.inTick = stats.inTick + 1
+                if stats.inTick > stats.maxPerTick then stats.maxPerTick = stats.inTick end
+            end
+            t0 = os.clock()
+        end
+
         process.dispatchWaiting(ev)
 
         runProcessQueue(ev)
+
+        local t1 = stats and os.clock()
 
         -- Kernel threads (the vt repaint among them) run after the
         -- processes, so what a process wrote for this key press reaches the
         -- screen in the same pass instead of one tick later.
         resumeKernelThreads()
+
+        if stats then
+            local t2 = os.clock()
+            stats.proc, stats.kthr = stats.proc + (t1 - t0), stats.kthr + (t2 - t1)
+            local now = computer.uptime()
+            if now - stats.since >= 2 then report(now) end
+        end
 
         if not process.get(1) then
             panic("not syncing", "Attempted to kill init!")
