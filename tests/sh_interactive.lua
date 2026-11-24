@@ -77,7 +77,7 @@ assert(printed:find("    1  ls") and printed:find("    3  echo one"), printed)
 local complete = options.complete
 local function same(a, b) table.sort(a); table.sort(b); return table.concat(a, ",") == table.concat(b, ",") end
 assert(same(complete("ed"), { "edit " }), table.concat(complete("ed"), ","))
-assert(same(complete("e"), { "echo", "edit", "env", "exit", "export" }), table.concat(complete("e"), ","))
+assert(same(complete("e"), { "echo", "edit", "env", "eval", "exec", "exit", "export" }), table.concat(complete("e"), ","))
 assert(same(complete("cat no"), { "cat notes.txt " }))
 assert(same(complete("cd d"), { "cd docs/" }))
 assert(same(complete("cat "), { "cat docs/", "cat notes.txt" }), "hidden files only on request")

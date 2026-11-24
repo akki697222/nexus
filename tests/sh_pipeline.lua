@@ -200,7 +200,7 @@ test("-c returns last stage status", function()
 end)
 
 test("missing pipeline segments return syntax status before spawning", function()
-    for _, line in ipairs({ "|cat", "cat|", "cat||cat" }) do
+    for _, line in ipairs({ "|cat", "cat|", "cat| |cat", "cat|;" }) do
         local result = run({ "-c", line })
         assert(result.code == 2 and #result.records == 0)
     end
