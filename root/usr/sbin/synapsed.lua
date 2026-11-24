@@ -8,13 +8,19 @@
 --
 --   <match>... <action>...
 --   match:  type=<component type>  label=<label>  address=<prefix>
+--           driver=<driver name>
 --   action: mount=<absolute path>  nomount  run=<absolute path>
 --
 --   label=backup                mount=/backup
 --   address=1a2b                nomount
 --   type=modem                  run=/usr/bin/netup.lua
+--   driver=printer3d            run=/usr/bin/printer-hook.lua
 --
 -- A run program is started as `program add|remove <address> <type>`.
+-- Rules with driver= run when the kernel binds or unbinds that driver
+-- (device_attached / device_detached), as
+-- `program add|remove <address> <type> <driver> <node>`; the others run
+-- when the component itself appears or goes away.
 -- The first matching rule with a mount action decides where (or whether)
 -- a filesystem is mounted; every matching run action is executed.
 
@@ -22,8 +28,7 @@ local fs = require("filesystem")
 local system = require("system")
 local event = require("event")
 local process = require("process")
-local component = rawget(_ENV, "component") or require("component")
-local computer = rawget(_ENV, "computer") or require("computer")
+local device = require("device")
 
 local RULES = "/etc/synapse.rules"
 local MOUNT_ROOT = "/mnt"
@@ -33,7 +38,7 @@ local function log(level, message) system.log(message, "synapsed", level) end
 
 -- Rules -------------------------------------------------------------------
 
-local MATCH = { type = true, label = true, address = true }
+local MATCH = { type = true, label = true, address = true, driver = true }
 local function loadRules()
     local rules = {}
     if not fs.exists(RULES) then return rules end
@@ -78,8 +83,9 @@ end
 
 local rules = loadRules()
 
-local function matches(rule, addr, ctype, label)
+local function matches(rule, addr, ctype, label, driver)
     local m = rule.match
+    if m.driver and m.driver ~= driver then return false end
     if m.type and m.type ~= ctype then return false end
     if m.address and addr:sub(1, #m.address) ~= m.address then return false end
     if m.label and m.label ~= label then return false end
@@ -87,14 +93,19 @@ local function matches(rule, addr, ctype, label)
 end
 
 local function labelOf(addr)
-    local ok, label = pcall(component.invoke, addr, "getLabel")
-    if ok and type(label) == "string" and label ~= "" then return label end
+    local info = device.get(addr)
+    return info and info.label
 end
 
-local function runActions(action, addr, ctype, label)
+-- Component events run the rules without driver=; driver events (driver
+-- set) run only the rules with driver=.
+local function runActions(action, addr, ctype, label, driver, node)
     for _, rule in ipairs(rules) do
-        if rule.run and matches(rule, addr, ctype, label) then
-            local pid, err = process.exec(rule.run, { action, addr, ctype })
+        if rule.run and (rule.match.driver ~= nil) == (driver ~= nil)
+            and matches(rule, addr, ctype, label, driver) then
+            local argv = { action, addr, ctype }
+            if driver then argv[4], argv[5] = driver, node or "-" end
+            local pid, err = process.exec(rule.run, argv)
             if not pid or pid == -1 then
                 log("err", rule.run .. ": " .. tostring(err))
             end
@@ -130,7 +141,8 @@ local function attach(addr)
     local label = labelOf(addr)
     local target
     for _, rule in ipairs(rules) do
-        if (rule.mount or rule.nomount) and matches(rule, addr, "filesystem", label) then
+        if (rule.mount or rule.nomount) and not rule.match.driver
+            and matches(rule, addr, "filesystem", label) then
             if rule.nomount then
                 log("info", string.format("%s (%s): not mounted (rule)", addr:sub(1, 8), label or "no label"))
                 return
@@ -167,16 +179,25 @@ end
 
 -- Main --------------------------------------------------------------------
 
--- coldplug: what is already attached
-for addr, ctype in component.list() do
-    local label = ctype == "filesystem" and labelOf(addr) or nil
-    if ctype == "filesystem" and addr ~= computer.tmpAddress() then attach(addr) end
-    runActions("add", addr, ctype, label)
+-- coldplug: what is already attached (/ and /tmp are mounted already, so
+-- attach() leaves them alone), then what the kernel bound at boot
+local present = {}
+for addr, info in pairs(device.list()) do
+    if info.component then present[#present + 1] = { addr, info } end
+end
+table.sort(present, function(a, b) return a[1] < b[1] end)
+for _, item in ipairs(present) do
+    local addr, info = item[1], item[2]
+    if info.component == "filesystem" then attach(addr) end
+    runActions("add", addr, info.component, info.label)
+end
+for _, b in ipairs(device.bindings()) do
+    if b.state == "bound" then runActions("add", b.address, b.type, nil, b.driver, b.node) end
 end
 log("info", string.format("started (%d rule%s)", #rules, #rules == 1 and "" or "s"))
 
 while true do
-    local name, addr, ctype = event.pull(next(busy) and RETRY or math.huge)
+    local name, addr, ctype, driver, node = event.pull(next(busy) and RETRY or math.huge)
     if name == "component_added" and type(addr) == "string" then
         log("info", string.format("added %s %s", tostring(ctype), addr:sub(1, 8)))
         local label = ctype == "filesystem" and labelOf(addr) or nil
@@ -186,6 +207,10 @@ while true do
         log("info", string.format("removed %s %s", tostring(ctype), addr:sub(1, 8)))
         if ctype == "filesystem" then detach(addr) end
         runActions("remove", addr, ctype, nil)
+    elseif (name == "device_attached" or name == "device_detached") and type(addr) == "string" then
+        log("info", string.format("%s %s %s", driver or "?",
+            name == "device_attached" and "bound to" or "released", addr:sub(1, 8)))
+        runActions(name == "device_attached" and "add" or "remove", addr, ctype, nil, driver, node)
     end
     for pending in pairs(busy) do detach(pending) end
 end

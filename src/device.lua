@@ -38,6 +38,8 @@ end
 ---@field vendor string
 ---@field product string
 ---@field node? string registered name under /dev
+---@field component? string OC component type (snapshots only)
+---@field label? string filesystem label (snapshots only)
 
 ---@class device_manifest_cpu : device_manifest
 ---@field clock string
@@ -158,14 +160,27 @@ function device.register()
     for _, id in ipairs(ids) do publish(id, system_devices[id]) end
 end
 
+-- Snapshot handed to callers: identifiers and plain data only, never the
+-- internal map or the devfs ops table. `component` is the OC component
+-- type; filesystems also carry their current label.
+local function snapshot(id, entry)
+    local result = util.copyTable(entry)
+    result.node = deviceNodes[id]
+    if component then
+        result.component = component.type(id)
+        if result.component == "filesystem" then
+            local ok, label = pcall(component.invoke, id, "getLabel")
+            if ok and type(label) == "string" and label ~= "" then result.label = label end
+        end
+    end
+    return result
+end
+
 ---@return table<string, device_manifest> # address = manifest
 function device.list()
     local result = {}
     for id, entry in pairs(system_devices) do
-        result[id] = util.copyTable(entry)
-        -- Device names are identifiers only. The snapshot never exposes the
-        -- internal map or the devfs ops table.
-        result[id].node = deviceNodes[id]
+        result[id] = snapshot(id, entry)
     end
     return result
 end
@@ -175,9 +190,7 @@ end
 function device.getFromType(type)
     for id, dev in pairs(system_devices) do
         if dev.type == type then
-            local result = util.copyTable(dev)
-            result.node = deviceNodes[id]
-            return result
+            return snapshot(id, dev)
         end
     end
 end
@@ -185,8 +198,6 @@ end
 function device.get(addr)
     local entry = system_devices[addr]
     if entry then
-        local result = util.copyTable(entry)
-        result.node = deviceNodes[addr]
-        return result
+        return snapshot(addr, entry)
     end
 end

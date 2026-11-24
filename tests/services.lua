@@ -187,7 +187,7 @@ do
         return false, "No such mount"
     end
     local function where(addr) for _, m in ipairs(mounts) do if m[1].address == addr then return m[2] end end end
-    fs.files["/etc/synapse.rules"] = "# rules\nlabel=backup mount=/backup\naddress=eee nomount\ntype=gpu run=/usr/bin/gpu-hook.lua\nlabel=x bogus=1\n"
+    fs.files["/etc/synapse.rules"] = "# rules\nlabel=backup mount=/backup\naddress=eee nomount\ntype=gpu run=/usr/bin/gpu-hook.lua\nlabel=x bogus=1\ndriver=printer3d run=/usr/bin/printer-hook.lua\n"
     local ran = {}
     local d = daemon("root/usr/sbin/synapsed.lua", {
         require = function(n)
@@ -197,19 +197,26 @@ do
             if n == "process" then
                 return { exec = function(p, args) ran[#ran + 1] = p .. " " .. table.concat(args, " "); return 50 end }
             end
+            if n == "device" then
+                return {
+                    list = function()
+                        local out = {}
+                        for a, t in pairs(present) do
+                            out[a] = { component = t, label = labels[a], type = "x" }
+                        end
+                        return out
+                    end,
+                    get = function(a)
+                        if present[a] then return { component = present[a], label = labels[a] } end
+                    end,
+                    bindings = function()
+                        return { { address = "prn001", type = "printer3d", driver = "printer3d", node = "printer0", state = "bound" },
+                                 { address = "bad001", type = "chat_box", driver = "chatbox", state = "failed" } }
+                    end,
+                }
+            end
             error(n)
         end,
-        component = {
-            list = function()
-                local keys = {}
-                for a in pairs(present) do keys[#keys + 1] = a end
-                table.sort(keys)
-                local i = 0
-                return function() i = i + 1; return keys[i], present[keys[i]] end
-            end,
-            invoke = function(a, m) assert(m == "getLabel"); return labels[a] end,
-        },
-        computer = { tmpAddress = function() return "tmp000" end },
     })
     local function event(...) return d.step(...) end
 
@@ -220,6 +227,8 @@ do
     assert(where("ccc333") == "/backup", "rule mount path")
     assert(where("boot00") == "/" and where("tmp000") == "/tmp", "existing mounts untouched")
     assert(ran[1] == "/usr/bin/gpu-hook.lua add gpu000 gpu", tostring(ran[1]))
+    assert(ran[2] == "/usr/bin/printer-hook.lua add prn001 printer3d printer3d printer0", tostring(ran[2]))
+    assert(#ran == 2, "driver rules skip component events and failed bindings")
     local logText = {}
     for _, e in ipairs(klog.read(0)) do logText[#logText + 1] = e.tag .. ": " .. e.msg end
     logText = table.concat(logText, "\n")
@@ -247,6 +256,17 @@ do
     assert(where("bbb222") == nil, "unmounted on retry")
     event("component_removed", "gpu000", "gpu")
     assert(ran[#ran] == "/usr/bin/gpu-hook.lua remove gpu000 gpu")
+
+    -- driver events
+    present.prn002 = "printer3d"
+    event("component_added", "prn002", "printer3d")
+    local before = #ran
+    event("device_attached", "prn002", "printer3d", "printer3d", "printer1")
+    assert(#ran == before + 1 and ran[#ran] == "/usr/bin/printer-hook.lua add prn002 printer3d printer3d printer1")
+    event("device_detached", "prn002", "printer3d", "printer3d", "printer1")
+    assert(ran[#ran] == "/usr/bin/printer-hook.lua remove prn002 printer3d printer3d printer1")
+    event("device_attached", "x1", "chat_box", "chatbox", nil)
+    assert(ran[#ran] == "/usr/bin/printer-hook.lua remove prn002 printer3d printer3d printer1", "other drivers do not match")
 end
 
 io.write("services tests passed\n")
