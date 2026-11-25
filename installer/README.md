@@ -31,9 +31,13 @@ The installer is one file, `nexus-install.lua`, in two stages:
 With an internet card:
 
 ```sh
-wget -f https://raw.githubusercontent.com/akki697222/nexus/dev-oc/dist/nexus-install.lua /tmp/nexus-install.lua
-/tmp/nexus-install.lua
+wget -f https://raw.githubusercontent.com/akki697222/nexus/dev-oc/dist/nexus-install.lua /home/nexus-install.lua
+/home/nexus-install.lua
 ```
+
+Download it to a disk, not to `/tmp`: `/tmp` is the tmpfs, 64 KB by
+default, and the installer is larger. OpenOS's `wget` still reports success
+for the cut-off file, which then fails with a syntax error.
 
 The installer takes the release that `dist/channel.lua` on the default
 branch (`dev-oc`) names (`stable`), so an older copy still installs the
