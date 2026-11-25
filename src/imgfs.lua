@@ -272,10 +272,13 @@ function imgfs.open(address, imagePath, sectionType)
             -- materializes more than a block of a large file
             local absolute = h.node.offset + h.pos
             local untilBlockEnd = blockSize - absolute % blockSize
-            -- a damaged or replaced image is a read error for the caller,
-            -- not an error raised in its process
+            -- /usr can no longer be trusted once a block of the mounted
+            -- image fails (damaged, or replaced while running): stop the
+            -- system instead of handing the error to whichever process read
             local ok, result = pcall(readRange, absolute, math.min(count, untilBlockEnd))
-            if not ok then return nil, tostring(result) end
+            if not ok then
+                panic("not syncing", "imgfs: " .. imagePath .. ": " .. tostring(result))
+            end
             data = result
         end
         h.pos = h.pos + #data

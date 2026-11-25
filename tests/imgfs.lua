@@ -325,18 +325,25 @@ fsA.close(badHandle)
 none, noneErr = imgfs.open("disk-a", "/boot/bad", imgfs.SECTION.usr)
 assert(not none and noneErr:find("not a Nexus boot image", 1, true))
 
--- 4. The image replaced under a mounted section: reads fail with an error
---    for the caller (the shell must survive running a command from /usr).
+-- 4. The image replaced under a mounted section: a failed block read is a
+--    kernel panic naming the image, not an error in the reading process.
 do
+    local savedPanic = panic
+    local panics = {}
+    panic = function(kind, reason)
+        panics[#panics + 1] = kind .. ": " .. reason
+        error("halted", 0)
+    end
     local live = assert(imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr))
     local swap = assert(fsA.open("/boot/nexusos", "w"))
     fsA.write(swap, ("x"):rep(#image))
     fsA.close(swap)
     local lh = assert(live.open("/lib/big.txt", "rb"))
     assert(live.seek(lh, "set", #big - 10))
-    local data, readErr = live.read(lh, 10)
-    assert(data == nil and tostring(readErr):find("imgfs:", 1, true), tostring(readErr))
-    live.close(lh)
+    local ok, err = pcall(live.read, lh, 10)
+    assert(not ok and err == "halted", tostring(err))
+    assert(#panics == 1 and panics[1]:find("^not syncing: imgfs: /boot/nexusos: imgfs:"), panics[1])
+    panic = savedPanic
 end
 
 for name, value in pairs(saved) do _G[name] = value end
