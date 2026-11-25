@@ -108,9 +108,10 @@ local function main()
     end
     vfs.chmod("/tmp", 1777)
 
-    -- Installed systems boot from an NXIMG (bootstrap/init.lua passes
-    -- image=): /usr is its read-only usr section, with modes and owners from
-    -- the image, and /etc is seeded from its etc section on first boot.
+    -- Images that carry /usr (bootstrap/init.lua passes image=; installs
+    -- before 0.0.8): /usr is the read-only usr section, with modes and owners
+    -- from the image, and /etc is seeded from its etc section on first boot.
+    -- Current installs have /usr as files on the root disk.
     local imagePath = kernelArg("image")
     if imagePath then
         local boot = computer.getBootAddress()
@@ -133,21 +134,10 @@ local function main()
     vfs.link("/usr/bin", "/bin")
     vfs.link("/usr/ubin", "/ubin")
 
-    -- Keep sudo as the only set-user-ID entry point. Its policy is immutable
-    -- to non-root users and defaults are installed in /etc/sudoers. An image
-    -- /usr already carries these modes and cannot be changed.
-    if not imagePath then
-        for path in vfs.list("/usr/bin") do
-            vfs.chmod(vfs.concat("/usr/bin", path), 0755)
-        end
-
-        for path in vfs.list("/usr/ubin") do
-            vfs.chmod(vfs.concat("/usr/ubin", path), 0755)
-        end
-
-        vfs.chown("/usr/bin/sudo.lua", 0, 0)
-        vfs.chmod("/usr/bin/sudo.lua", 04755)
-    end
+    -- Modes and owners of /usr come from the image (imgfs) or from the .meta
+    -- files the installer and build.lua write (tools/nximg.lua has the
+    -- rules: sudo is the only set-user-ID program). The sudo policy stays
+    -- immutable to non-root users.
     vfs.chown("/etc/sudoers", 0, 0)
     vfs.chmod("/etc/sudoers", 0440)
 

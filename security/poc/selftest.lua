@@ -157,6 +157,66 @@ local function check_nx17()
     print("NX-17: sudo executed the payload as root without a password")
 end
 
+local function check_nx04()
+    -- src/kernel/env.lua: the user-tier `event` API is functions(event, exclude)
+    -- with exclude = { addHook, removeHook, markIdle }. dispatch, setForeground
+    -- and removeQueue are not in that set, so they are handed to unprivileged
+    -- processes.
+    local env_source = read("src/kernel/env.lua")
+    local exclude
+    for line in env_source:gmatch("[^\r\n]+") do
+        if line:find("functions(event", 1, true) then exclude = line break end
+    end
+    assert(exclude, "could not find the user-tier event line in env.lua")
+    for _, name in ipairs({ "dispatch", "setForeground", "removeQueue" }) do
+        assert(not exclude:find(name), name .. " must be withheld from the user tier but is exposed")
+    end
+
+    -- Mirror src/proc/event.lua dispatch() (every registered hook runs on the
+    -- event) and the tty input hook (tty.signal -> ttys[activeId]:signal, the
+    -- keyboard address in slot 2 ignored). A forged event from user code runs
+    -- the hook and lands tokens in the active terminal's cooked line buffer.
+    local hooks = {}
+    local function addHook(fn) hooks[#hooks + 1] = fn end
+    local function dispatch(ev)
+        if not ev or ev.n == 0 then return end
+        for _, hook in ipairs(hooks) do hook(ev) end
+    end
+
+    local active = { tokens = {}, line = nil, buffer = "" }
+    local function push(token) active.tokens[#active.tokens + 1] = token end
+    -- tty_driver:signal shape: text_input pushes its string; key_down char 13
+    -- commits the line (src/.../tty.lua keyPress/typeText).
+    local function signal(name, _addr, char)
+        if name == "text_input" then
+            push({ text = char })
+        elseif name == "key_down" and char == 13 then
+            push({ char = 13 })
+        end
+    end
+    -- tty.signal(ev): forwards ev[1..4] to the active tty, ignoring ev[2].
+    addHook(function(ev) signal(ev[1], ev[2], ev[3], ev[4]) end)
+    local function drain()
+        for _, t in ipairs(active.tokens) do
+            if t.text then
+                active.buffer = active.buffer .. t.text
+            elseif t.char == 13 then
+                active.line, active.buffer = active.buffer, ""
+            end
+        end
+    end
+
+    -- the same two events nx04_event_injection.lua dispatches
+    dispatch(table.pack("text_input", "nx04", "id -u > /root/nx04_proof"))
+    dispatch(table.pack("key_down", "nx04", 13, 28))
+    drain()
+    assert(active.line == "id -u > /root/nx04_proof",
+        "the forged line must reach the active terminal's reader")
+
+    print("NX-04: a forged event from user code reaches the active terminal's reader")
+end
+
+check_nx04()
 check_nx16()
 check_nx17()
 print("all host-side checks passed")

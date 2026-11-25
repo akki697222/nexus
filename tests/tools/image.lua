@@ -156,6 +156,17 @@ for _, row in pairs(gpu.rows) do
     assert(cells <= 50, "row wider than the screen: " .. row)
 end
 
+-- 1b. A kernel-only image (installed systems, /usr is on the disk): no
+-- image= for the kernel.
+do
+    local kernelOnly = nximg.encode({ { type = nximg.SECTION.kernel, data = stub } },
+        { compression = nximg.COMP_ZLIB, blockSize = 1024, deflate = deflate })
+    local okk, errk, envk = boot({ ["/boot/nexusos"] = kernelOnly })
+    assert(okk, errk)
+    assert(envk.KERNEL_ARGS[1] == "init=/usr/sbin/init.lua" and envk.KERNEL_ARGS[2] == nil,
+        "no image= without a usr section")
+end
+
 -- 2. Without a data card a compressed image is inflated in Lua, yielding
 -- between blocks, and the inflater is handed to the kernel.
 local info0 = nximg.parseHeader(image)

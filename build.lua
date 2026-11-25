@@ -105,6 +105,12 @@ else
     print("Directory sync complete.")
 end
 
+-- Modes and owners of /usr (sudo is set-user-ID) as .meta files, from the
+-- rules images and the installer use (tools/nximg.lua); the kernel does not
+-- set them at boot.
+local nximg = assert(loadfile("tools/nximg.lua"))()
+print("Metadata: " .. nximg.deployMeta("root/usr", "../ocelot/boot/usr", "/usr") .. " .meta files in ../ocelot/boot/usr")
+
 -- after the sync: overwrite mode starts from an empty ../ocelot/boot, so
 -- boot/ only exists once ./root has been copied
 os.execute("if not exist \"..\\ocelot\\boot\\boot\" mkdir \"..\\ocelot\\boot\\boot\"")
@@ -132,6 +138,7 @@ if deployToOC then
         print("Warning: Failed to sync root to OC save directory.")
     else
         print("OC save directory sync complete.")
+        nximg.deployMeta("root/usr", ocDeploy .. "\\usr", "/usr")
     end
 end
 
@@ -151,7 +158,6 @@ local function exists(path)
 end
 
 if deployImages then
-    local nximg = assert(loadfile("tools/nximg.lua"))()
     for _, target in ipairs(IMAGE_TARGETS) do
         local winDir = target.dir:gsub("/", "\\")
         os.execute("if not exist \"" .. winDir .. "\\boot\" mkdir \"" .. winDir .. "\\boot\"")

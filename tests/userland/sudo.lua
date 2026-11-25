@@ -11,10 +11,16 @@ local argparse_source = read("root/usr/lib/libargparse.lua")
 local main_source = read("src/kernel/main.lua")
 local unpack_args = table.unpack or unpack
 
-assert(main_source:find('vfs.chown("/usr/bin/sudo.lua", 0, 0)', 1, true)
-    and main_source:find('vfs.chmod("/usr/bin/sudo.lua", 04755)', 1, true)
+-- sudo's set-user-ID bit comes from the image rules (tools/nximg.lua), which
+-- images, the installer's .meta files and build.lua share; boot keeps the
+-- sudoers file locked down.
+local nximg = assert(loadfile("tools/nximg.lua"))()
+assert(nximg.DEFAULT_ATTRS["/usr/bin/sudo.lua"].mode == "4755"
+    and not nximg.DEFAULT_ATTRS["/usr/bin/sudo.lua"].uid,
+    "sudo must be installed root-owned and set-user-ID")
+assert(main_source:find('vfs.chown("/etc/sudoers", 0, 0)', 1, true)
     and main_source:find('vfs.chmod("/etc/sudoers", 0440)', 1, true),
-    "boot must install sudo as root-owned setuid and lock down sudoers")
+    "boot must lock down sudoers")
 assert(main_source:find("return tty.read(...) ", 1, true) or main_source:find("return tty.read(...)", 1, true),
     "stdin must forward the mask argument to tty.read")
 

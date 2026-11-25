@@ -5,12 +5,21 @@
 -- Host-side tool (Lua 5.3+). Run from the nexus root:
 --   lua tools/nximg.lua build  <out> [--kernel f] [--usr dir] [--etc dir]
 --                                    [--store] [--block n] [--lib f] [--attrs f]
+--                                    [--sections kernel,usr,etc]
 --   lua tools/nximg.lua info    <image> [usr|etc]
 --   lua tools/nximg.lua verify  <image> [--lib f]
 --   lua tools/nximg.lua extract <image> <kernel|usr|etc> <dest> [--lib f]
 --   lua tools/nximg.lua dist    <dir> [build options]
---       <dir>/nexusos + <dir>/init.lua (bootstrap/init.lua)
---       + <dir>/config.lua (root/boot/config.lua), as nexus-install expects
+--       the files nexus-install installs from:
+--       nexusos            kernel only (boot image, /boot/nexusos)
+--       rootfs             usr and etc sections (unpacked onto the disk)
+--       init.lua           bootstrap/init.lua (/init.lua)
+--       config.lua         root/boot/config.lua (/boot/config.lua)
+--       nexus-install.lua  the installer (tools/mkinstaller.lua)
+--       manifest.lua       sizes, checksums and optional groups
+--   lua tools/nximg.lua media   <dist dir> <out dir>
+--       an install medium: <out>/init.lua is the installer and
+--       <out>/.nexus-install/ holds the distribution (offline install)
 --
 -- Image layout (all integers little endian)
 --
@@ -353,22 +362,36 @@ local function cmd_build(args)
     if not depmod.run((opts.usr or "root/usr") .. "/lib/drivers", nil, true) then
         error("depmod failed", 0)
     end
-    local usr, usr_n = build_fs(opts.usr or "root/usr", "/usr", attrs)
-    local etc, etc_n = build_fs(opts.etc or "root/etc", "/etc", attrs)
+    local wanted = {}
+    for name in (opts.sections or "kernel,usr,etc"):gmatch("[^,]+") do
+        if not nximg.SECTION[name] then error("unknown section " .. name, 0) end
+        wanted[name] = true
+    end
+    local sections, report = {}, {}
+    if wanted.kernel then
+        sections[#sections + 1] = { type = nximg.SECTION.kernel, data = kernel }
+        report[#report + 1] = string.format("kernel %d B", #kernel)
+    end
+    for _, name in ipairs({ "usr", "etc" }) do
+        if wanted[name] then
+            local raw, n = build_fs(opts[name] or ("root/" .. name), "/" .. name, attrs)
+            sections[#sections + 1] = { type = nximg.SECTION[name], data = raw }
+            report[#report + 1] = string.format("%s %d entries %d B", name, n, #raw)
+        end
+    end
+    if #sections == 0 then error("no sections", 0) end
     local comp = opts.store and nximg.COMP_STORE or nximg.COMP_ZLIB
     local deflate
     if comp == nximg.COMP_ZLIB then
         local lib = load_libdeflate(opts.lib)
         deflate = function(raw) return lib:CompressZlib(raw, { level = 9 }) end
     end
-    local image = nximg.encode({
-        { type = nximg.SECTION.kernel, data = kernel },
-        { type = nximg.SECTION.usr, data = usr },
-        { type = nximg.SECTION.etc, data = etc },
-    }, { compression = comp, blockSize = tonumber(opts.block) or nximg.DEFAULT_BLOCK, deflate = deflate })
+    local image = nximg.encode(sections,
+        { compression = comp, blockSize = tonumber(opts.block) or nximg.DEFAULT_BLOCK, deflate = deflate })
     write_file(out, image)
-    print(string.format("%s: %s, kernel %d B, usr %d entries %d B, etc %d entries %d B -> %d B",
-        out, comp == 1 and "zlib" or "store", #kernel, usr_n, #usr, etc_n, #etc, #image))
+    print(string.format("%s: %s, %s -> %d B", out, comp == 1 and "zlib" or "store",
+        table.concat(report, ", "), #image))
+    return image
 end
 
 local function open_image(path, libpath)
@@ -452,23 +475,176 @@ local function cmd_extract(args)
     end
 end
 
+local function mkdir_p(p)
+    if windows then
+        os.execute('if not exist "' .. p:gsub("/", "\\") .. '" mkdir "' .. p:gsub("/", "\\") .. '"')
+    else
+        os.execute('mkdir -p "' .. p .. '"')
+    end
+end
+
+-- The installer's revision, from installer/src/prelude.lua.
+local function installer_rev()
+    local rev = read_file("installer/src/prelude.lua"):match("local INSTALLER_REV = (%d+)")
+    return tonumber((assert(rev, "INSTALLER_REV not found in installer/src/prelude.lua")))
+end
+
+-- Serializes plain data (strings, numbers, booleans, tables) as Lua.
+local function serialize(v, indent)
+    indent = indent or ""
+    local t = type(v)
+    if t == "string" then return string.format("%q", v) end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    if t ~= "table" then error("cannot serialize " .. t) end
+    local inner = indent .. "    "
+    local parts = {}
+    local n = #v
+    for i = 1, n do parts[#parts + 1] = inner .. serialize(v[i], inner) .. ",\n" end
+    local keys = {}
+    for k in pairs(v) do
+        if not (math.type(k) == "integer" and k >= 1 and k <= n) then keys[#keys + 1] = k end
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        parts[#parts + 1] = inner .. k .. " = " .. serialize(v[k], inner) .. ",\n"
+    end
+    if #parts == 0 then return "{}" end
+    return "{\n" .. table.concat(parts) .. indent .. "}"
+end
+nximg.serialize = serialize
+
+-- Optional groups for the manifest: installer/groups.lua and one group per
+-- driver of drivers.idx. Paths that are not in the rootfs are dropped, and
+-- groups left without a path.
+local function manifest_groups(usr_dir, etc_dir)
+    local present = {}
+    for _, e in ipairs(list_tree(usr_dir)) do present["usr/" .. e.path] = true end
+    for _, e in ipairs(list_tree(etc_dir)) do present["etc/" .. e.path] = true end
+    local groups = {}
+    for _, g in ipairs(assert(loadfile("installer/groups.lua"))()) do
+        local paths = {}
+        for _, p in ipairs(g.paths) do
+            if present[p] then paths[#paths + 1] = p end
+        end
+        if #paths > 0 then
+            groups[#groups + 1] = { id = g.id, name = g.name, desc = g.desc, default = g.default ~= false,
+                paths = paths, modules = g.modules }
+        end
+    end
+    local index = assert(loadfile(usr_dir .. "/lib/drivers/drivers.idx", "t", {}))()
+    for _, d in ipairs(index.drivers) do
+        local path = d.path:gsub("^/", "")
+        if present[path] then
+            groups[#groups + 1] = { id = "driver:" .. d.name, name = d.desc or d.name, default = true,
+                paths = { path }, drivers = { d.path } }
+        end
+    end
+    return groups
+end
+
 local function cmd_dist(args)
     local dir = assert(args[2], "usage: nximg dist <dir> [build options]")
-    if windows then
-        os.execute('if not exist "' .. dir:gsub("/", "\\") .. '" mkdir "' .. dir:gsub("/", "\\") .. '"')
-    else
-        os.execute('mkdir -p "' .. dir .. '"')
+    local opts = parse_options(args, 3)
+    mkdir_p(dir)
+    local passthrough = {}
+    for i = 3, #args do passthrough[#passthrough + 1] = args[i] end
+    local function build(out, sections)
+        local a = { "build", out }
+        for _, v in ipairs(passthrough) do a[#a + 1] = v end
+        a[#a + 1] = "--sections"
+        a[#a + 1] = sections
+        return cmd_build(a)
     end
-    local build_args = { "build", dir .. "/nexusos" }
-    for i = 3, #args do build_args[#build_args + 1] = args[i] end
-    cmd_build(build_args)
-    write_file(dir .. "/init.lua", read_file("bootstrap/init.lua"))
-    write_file(dir .. "/config.lua", read_file("root/boot/config.lua"))
-    print(dir .. ": nexusos, init.lua, config.lua")
+    local kernelImage = build(dir .. "/nexusos", "kernel")
+    local rootfs = build(dir .. "/rootfs", "usr,etc")
+    local info = nximg.parseHeader(rootfs)
+    local unpacked = 0
+    for _, sec in ipairs(info.sections) do unpacked = unpacked + sec.rawSize end
+
+    local mkinstaller = assert(loadfile("tools/mkinstaller.lua"))()
+    local installer = mkinstaller.build()
+    local files = {
+        { name = "nexusos", role = "kernel", data = kernelImage },
+        { name = "rootfs", role = "rootfs", data = rootfs },
+        { name = "init.lua", role = "boot", data = read_file("bootstrap/init.lua") },
+        { name = "config.lua", role = "config", data = read_file("root/boot/config.lua") },
+        { name = "nexus-install.lua", role = "installer", data = installer },
+    }
+    local config = assert(loadfile("root/boot/config.lua"))()
+    local manifest = {
+        format = 1,
+        installer = installer_rev(),
+        version = config.kernel_version.ver,
+        -- bytes the installed system takes, about (files without .meta)
+        installed = #kernelImage + unpacked + #files[3].data + #files[4].data,
+        -- the kernel uncompressed (an uncompressed /boot/nexusos is about this)
+        kernelRaw = nximg.parseHeader(kernelImage).sections[1].rawSize,
+        files = {},
+        groups = manifest_groups(opts.usr or "root/usr", opts.etc or "root/etc"),
+    }
+    for _, f in ipairs(files) do
+        write_file(dir .. "/" .. f.name, f.data)
+        manifest.files[#manifest.files + 1] = { name = f.name, role = f.role, size = #f.data,
+            crc32 = nximg.crc32(f.data) }
+    end
+    write_file(dir .. "/manifest.lua",
+        "-- generated by tools/nximg.lua dist; do not edit\nreturn " .. serialize(manifest) .. "\n")
+    print(dir .. ": nexusos, rootfs, init.lua, config.lua, nexus-install.lua, manifest.lua")
+end
+
+-- An install medium from a dist directory: the installer as /init.lua and
+-- the distribution in /.nexus-install, for an offline install from any disk
+-- (a floppy fits).
+local function cmd_media(args)
+    local dist, out = args[2], args[3]
+    assert(dist and out, "usage: nximg media <dist dir> <out dir>")
+    local manifest_text = read_file(dist .. "/manifest.lua")
+    local manifest = assert(load(manifest_text, "=manifest", "t", {}))()
+    mkdir_p(out .. "/.nexus-install")
+    local total = #manifest_text
+    for _, f in ipairs(manifest.files) do
+        local data = read_file(dist .. "/" .. f.name)
+        if f.role == "installer" then
+            write_file(out .. "/init.lua", data)
+        else
+            write_file(out .. "/.nexus-install/" .. f.name, data)
+        end
+        total = total + #data
+    end
+    write_file(out .. "/.nexus-install/manifest.lua", manifest_text)
+    print(string.format("%s: install medium, %d bytes", out, total))
+end
+
+-- Writes the .meta files of a deployed tree (build.lua copies root/ to a
+-- development disk): one per directory below `mount`, with the same modes
+-- and owners an image or the installer would give. The .meta of the
+-- parent of `mount` is left alone.
+function nximg.deployMeta(src, dest, mount, attrs)
+    attrs = attrs or nximg.DEFAULT_ATTRS
+    local env = { string = string, math = math, table = table, pairs = pairs, ipairs = ipairs }
+    assert(loadfile("installer/src/meta.lua", "t", env))()
+    local set = env.meta.new()
+    for _, e in ipairs(list_tree(src)) do
+        local abs = mount .. "/" .. e.path
+        local a = attrs[abs] or {}
+        local mode = a.mode and (type(a.mode) == "string" and octal(a.mode) or a.mode) or default_mode(abs, e.kind)
+        set.add(abs, e.kind == nximg.FS_DIR, mode, a.uid or 0, a.gid or 0)
+    end
+    local count = 0
+    set.each(os.time(), function(dir, text)
+        if dir == mount or dir:sub(1, #mount + 1) == mount .. "/" then
+            local target = dest .. dir:sub(#mount + 1)
+            local probe = io.open(target .. "/.meta", "ab")
+            if probe then probe:close() else mkdir_p(target) end
+            write_file(target .. "/.meta", text)
+            count = count + 1
+        end
+    end)
+    return count
 end
 
 local commands = { build = cmd_build, info = cmd_info, verify = cmd_verify, extract = cmd_extract,
-    dist = cmd_dist }
+    dist = cmd_dist, media = cmd_media }
 
 -- For build.lua: run a subcommand with an argv-style table, e.g.
 -- nximg.run({ "build", "out/nexusos", "--store" }). Errors are raised.
@@ -482,7 +658,7 @@ end
 if arg and arg[0] and arg[0]:match("nximg%.lua$") then
     local command = commands[arg[1] or ""]
     if not command then
-        io.stderr:write("usage: lua tools/nximg.lua <build|info|verify|extract|dist> ...\n")
+        io.stderr:write("usage: lua tools/nximg.lua <build|info|verify|extract|dist|media> ...\n")
         os.exit(1)
     end
     local ok, err = pcall(command, arg)

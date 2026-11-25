@@ -1,0 +1,36 @@
+# An install medium (lua tools/nximg.lua media DIST DISK) installing onto
+# itself: the installer's dialogs, the first boot, a login with the user it
+# created and sudo (set-user-ID from the .meta files the installer wrote).
+wait "Install Nexus" 60
+key enter
+wait "Select disk" 120
+key enter
+wait "Enter the hostname" 30
+type "\b\b\b\b\btestbox\n"
+wait "Username:"
+type "alice\n"
+wait "Choose a password"
+type "alicepw\n"
+wait "same password again"
+type "alicepw\n"
+wait "Software selection"
+key tab
+key enter
+wait "How should the kernel image"
+key enter
+wait "Write the changes"
+type "y"
+wait "Installation complete" 600
+key enter
+wait "Login: " 300
+type "alice\n"
+wait "Password: "
+type "alicepw\n"
+wait "alice@testbox:" 60
+type "sudo id\n"
+wait "[sudo] password for alice: "
+type "alicepw\n"
+wait "uid=0(root)"
+type "id\n"
+wait "uid=1000(alice)"
+screen installed

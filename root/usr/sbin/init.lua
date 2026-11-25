@@ -141,7 +141,7 @@ if fs.exists("/etc/profile.lua") then
 end
 
 if not os.getenv("HOSTNAME") then
-    -- /etc/hostname is written by firstboot; "nexus" until then
+    -- /etc/hostname is written by the installer; "nexus" without one
     local file = io.open("/etc/hostname", "r")
     local name = file and file:read("*l")
     if file then file:close() end

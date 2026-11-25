@@ -1,3 +1,0 @@
--- locale.lua
--- Copyright (c) 2026 akki697222
--- SPDX-License-Identifier: MIT

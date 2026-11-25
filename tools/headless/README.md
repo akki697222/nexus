@@ -96,10 +96,9 @@ of the machine fails the script with the error and the screen.
 ## Examples
 
 ```sh
-# a fresh release image: first boot setup, login, sudo
-mkdir -p /tmp/disk/boot
-cp dist/nexusos dist/config.lua /tmp/disk/boot/ && cp dist/init.lua /tmp/disk/
-tools/headless/nexus-headless.sh --tick-ms 10 --disk /tmp/disk tools/headless/examples/firstboot.txt
+# a release: install from a medium, first boot, login, sudo
+lua tools/kbuild.lua && lua tools/nximg.lua dist /tmp/dist && lua tools/nximg.lua media /tmp/dist /tmp/disk
+tools/headless/nexus-headless.sh --tick-ms 10 --disk /tmp/disk tools/headless/examples/install.txt
 
 # the development zlib disk, left as it is
 tools/headless/nexus-headless.sh --tick-ms 10 --disk-copy ../ocelot/nexusos-zlib tools/headless/examples/login-debug.txt

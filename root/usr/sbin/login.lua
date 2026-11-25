@@ -27,42 +27,7 @@ local function setTtyOwner(path, uid, gid)
     end
 end
 
--- A fresh install has only root, with a locked password: nobody can log in
--- until firstboot has set one.
-local FIRSTBOOT = "/usr/sbin/firstboot.lua"
-
-local function anyoneCanLogIn()
-    if user.hasPassword("root") then return true end
-    local file = io.open("/etc/passwd", "r")
-    if not file then return false end
-    local content = file:read("a") or ""
-    file:close()
-    for line in content:gmatch("[^\r\n]+") do
-        local name = line:match("^([^:]+):")
-        if name and user.hasPassword(name) then return true end
-    end
-    return false
-end
-
-local function readHostname()
-    local file = io.open("/etc/hostname", "r")
-    local name = file and file:read("*l")
-    if file then file:close() end
-    if name and name ~= "" then return name end
-end
-
 while true do
-    if not anyoneCanLogIn() and fs.exists(FIRSTBOOT) then
-        local pid, err = process.exec(FIRSTBOOT, {})
-        if pid == -1 then
-            io.stderr:write("login: " .. FIRSTBOOT .. ": " .. tostring(err) .. "\n")
-        else
-            process.wait(pid)
-        end
-        local hostname = readHostname()
-        if hostname then process.setEnviron("HOSTNAME", hostname) end
-    end
-
     io.write("Login: ")
     local username = io.read()
 

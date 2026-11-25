@@ -14,7 +14,8 @@
 _ENV = _ENV
 
 local IMAGE = "/boot/nexusos"
-local KERNEL_ARGS = { "init=/usr/sbin/init.lua", "image=" .. IMAGE }
+-- image= is added when the image also carries /usr (older all-in-one images)
+local KERNEL_ARGS = { "init=/usr/sbin/init.lua" }
 
 local invoke = component.invoke
 local bootAddress = computer.getBootAddress()
@@ -65,21 +66,28 @@ local function readAt(offset, length)
     return table.concat(parts)
 end
 
-local crcTable = {}
-for i = 0, 255 do
-    local crc = i
-    for _ = 1, 8 do
-        if crc & 1 == 1 then crc = (crc >> 1) ~ 0xEDB88320 else crc = crc >> 1 end
+-- The blocks between {{shared and }}shared are also built into the
+-- installer (tools/mkinstaller.lua).
+local crc32
+-- {{shared crc32
+do
+    local crcTable = {}
+    for i = 0, 255 do
+        local crc = i
+        for _ = 1, 8 do
+            if crc & 1 == 1 then crc = (crc >> 1) ~ 0xEDB88320 else crc = crc >> 1 end
+        end
+        crcTable[i] = crc
     end
-    crcTable[i] = crc
-end
-local function crc32(data, crc)
-    crc = (crc or 0) ~ 0xFFFFFFFF
-    for i = 1, #data do
-        crc = crcTable[(crc ~ data:byte(i)) & 0xFF] ~ (crc >> 8)
+    crc32 = function(data, crc)
+        crc = (crc or 0) ~ 0xFFFFFFFF
+        for i = 1, #data do
+            crc = crcTable[(crc ~ data:byte(i)) & 0xFF] ~ (crc >> 8)
+        end
+        return (crc ~ 0xFFFFFFFF) & 0xFFFFFFFF
     end
-    return (crc ~ 0xFFFFFFFF) & 0xFFFFFFFF
 end
+-- }}shared
 
 -- Header, section table and block index.
 local header = readAt(0, 32)
@@ -102,9 +110,11 @@ end
 local kernel
 for i = 0, sectionCount - 1 do
     local typ, _, _, rawSize, firstBlock, nblocks, crc = string.unpack("<BBI2I4I4I4I4", meta, i * 24 + 1)
-    if typ == 1 then
+    if typ == 1 and not kernel then
         kernel = { rawSize = rawSize, firstBlock = firstBlock, blockCount = nblocks, crc = crc }
-        break
+    elseif typ == 2 then
+        -- an image with /usr: the kernel mounts it read-only (imgfs)
+        KERNEL_ARGS[#KERNEL_ARGS + 1] = "image=" .. IMAGE
     end
 end
 if not kernel or kernel.blockCount == 0 then
@@ -121,6 +131,7 @@ end
 -- block is a standalone zlib stream of at most one block size, so the
 -- whole output stays in memory and doubles as the LZ77 window.
 local softInflate
+-- {{shared softInflate
 do
     local byte, char, unpack = string.byte, string.char, table.unpack
     local LBASE = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
@@ -316,6 +327,7 @@ do
         return table.concat(done)
     end
 end
+-- }}shared
 
 local inflate
 if compression == 1 then
