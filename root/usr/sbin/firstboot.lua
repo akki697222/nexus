@@ -86,8 +86,7 @@ end
 
 print("")
 print("Nexus first boot setup")
-print("No account can log in yet. Set the root password, and create a user")
-print("for everyday use if you like.")
+print("No account can log in yet. Set the root password, and create a user for everyday use if you like.")
 print("")
 
 -- hostname
