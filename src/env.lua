@@ -246,7 +246,7 @@ local function newApis(tier)
         filesystem = lock(vfs, "filesystem"),
         component  = component,
         computer   = computer,
-        event      = functions(event, tier == "user" and { addHook = true, removeHook = true } or nil),
+        event      = functions(event, tier == "user" and { addHook = true, removeHook = true, markIdle = true } or nil),
         unicode    = functions(unicode),
         permission = functions(permission),
         module     = newModuleApi(),

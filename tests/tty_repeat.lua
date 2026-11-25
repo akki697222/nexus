@@ -122,6 +122,24 @@ tty.tick(2)
 assert(queued() == 4, "no repeat after key_up")
 clear()
 
+-- 2b. A key_up still queued behind a busy process: the repeat waits until
+-- the kernel has found the signal queue empty after it fell due, so the
+-- late key_up cancels it (Enter answering a prompt must not repeat).
+now = 2.5
+down(13, ENTER)                   -- due at 2.9
+tty.tick(3.0, 2.5)                -- queue last seen empty before that
+assert(queued() == 1, "no repeat before the queue was drained")
+up(13, ENTER)                     -- the key_up that was waiting
+tty.tick(3.05, 3.05)
+assert(queued() == 1, "the late key_up cancels it")
+clear()
+now = 3.5
+down(13, ENTER)                   -- held for real: due at 3.9
+tty.tick(3.9, 3.9)
+assert(queued() == 2, "a held key repeats once the queue is drained")
+up(13, ENTER)
+clear()
+
 -- 3. Late passes: the due repeats are queued together (capped), and a rate
 -- above 20/s gives more than one repeat in a tick.
 now = 3

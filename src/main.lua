@@ -312,6 +312,8 @@ local function main()
             device.handleEvent(ev[1], ev[2])
             devmgr.handleEvent(ev[1], ev[2], ev[3])
             event.dispatch(ev)
+        else
+            event.markIdle(computer.uptime())
         end
 
         if stats then stats.pass(ev) end

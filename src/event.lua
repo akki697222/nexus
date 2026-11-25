@@ -17,6 +17,20 @@ event.handlers = handlers
 local queues = {}
 local foreground_pid = -1
 
+-- Uptime of the last kernel loop pass that found no signal waiting. Input
+-- that is due later (a key repeat) can only be trusted once a pass after
+-- that time has drained the queue: a key_up may still be waiting in it.
+local idleAt = nil
+
+function event.markIdle(now)
+    idleAt = now
+end
+
+---@return number|nil
+function event.idleAt()
+    return idleAt
+end
+
 -- Events a process never pulls must not pile up forever.
 local MAX_QUEUE = 256
 

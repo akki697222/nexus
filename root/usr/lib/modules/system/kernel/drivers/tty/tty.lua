@@ -497,10 +497,14 @@ function tty_driver:signal(name, _, char, key)
 end
 
 -- Repeats of the held key that are due (kernel thread, every pass).
-function tty_driver:tickRepeat(now)
+-- idleAt is when the kernel last found no signal waiting: a repeat is only
+-- due once that is past its time, so a key_up still queued behind a busy
+-- process (a long hash, a file write) cancels it instead of being late.
+function tty_driver:tickRepeat(now, idleAt)
     local held = self.held
     -- uptime moves in 0.05 s ticks that do not add up exactly
     if not held or now + 1e-6 < held.due then return end
+    if idleAt and idleAt + 1e-6 < held.due then return end
     if not self:ownsInput() then
         self.held = nil
         return
@@ -874,9 +878,10 @@ function tty.signal(ev)
 end
 
 -- Due key repeats of every tty (kernel thread).
-function tty.tick(now)
+function tty.tick(now, idleAt)
     now = now or computer.uptime()
-    for _, t in pairs(ttys) do t:tickRepeat(now) end
+    if idleAt == nil and event.idleAt then idleAt = event.idleAt() end
+    for _, t in pairs(ttys) do t:tickRepeat(now, idleAt) end
 end
 
 function tty.getCursor()
@@ -920,7 +925,7 @@ return {
     manifest = {
         name = "tty",
         desc = "tty driver",
-        version_n = 1,
-        version = "0.1.0-OC"
+        version_n = 2,
+        version = "0.1.1-OC"
     }
 }
