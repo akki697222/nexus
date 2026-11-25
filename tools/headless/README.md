@@ -35,12 +35,35 @@ tools/headless/nexus-headless.sh [options] [script|-]
 | `--eeprom FILE` | EEPROM code instead of the Lua BIOS |
 | `--arch 5.2\|5.3` | CPU architecture (default 5.3) |
 | `--data-card 0-3` | data card tier, 0 for none (default 1) |
-| `--internet` | add an internet card |
 | `--screen-tier 1-3` | GPU and screen tier (default 3) |
 | `--tick-ms N` | real milliseconds per tick (default 50, as in the game); 10 runs about 4x faster |
+| `--ocelot-log T` | add an Ocelot card; its `log()` lines go to T |
+| `--serial T` | add a serial port (component `serial`, `write(data)`); what is written goes to T |
+| `--netconsole P[:T]` | listen on 127.0.0.1:P and send what TCP clients write to T (default `-`); adds an internet card that may reach 127.0.0.1 |
+| `--internet` | add an internet card that may reach 127.0.0.1 (for an outside server such as `tools/debugserver`) |
 | `--wait-timeout S` | default timeout of `wait` (default 30 s) |
 
 Times in scripts are machine time: 20 ticks a second, whatever `--tick-ms` is.
+
+A target T is a file (appended, raw) or `-`: standard output, one line each,
+prefixed `ocelot|`, `serial|` or `tcp|`.
+
+## Debug output
+
+The kernel's debug consoles (`src/debugcon.lua`, `debug_console` in
+`/boot/config.lua`) send every kernel log line to an Ocelot card, a serial
+port and a TCP server, from the first boot line on, panics included. Here:
+
+```sh
+# kernel log on standard output, beside the screen dumps
+tools/headless/nexus-headless.sh --serial - --disk-copy DISK script.txt
+
+# netconsole: needs debug_console.tcp = "127.0.0.1:7777" in the disk's config
+tools/headless/nexus-headless.sh --netconsole 7777:/tmp/net.log --disk DISK script.txt
+```
+
+`wait-log "text"` waits for text in any of these outputs: kernel messages,
+`logger` lines from userland, a panic.
 
 ## Scripts
 
@@ -55,6 +78,7 @@ take `\n` (Enter), `\t` (Tab), `\b` (Backspace), `\\` and `\"`.
 | `key NAME [N]` | press a key N times: `enter tab backspace delete escape up down left right home end pageup pagedown space`, or `ctrl+c` and the like |
 | `sleep S` | let S seconds pass |
 | `screen [title]` | print the screen |
+| `wait-log "text" [S]` | until the debug output (Ocelot card, serial, netconsole) shows text |
 | `expect "text"` / `refuse "text"` | fail unless / if the screen shows text now |
 | `running` | fail unless the machine is running |
 | `stopped [S]` | until the machine stops (shutdown or crash) |

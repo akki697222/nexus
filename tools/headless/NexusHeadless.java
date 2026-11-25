@@ -26,6 +26,14 @@ import totoro.ocelot.brain.user.User;
 import totoro.ocelot.brain.util.ExtendedTier$;
 import totoro.ocelot.brain.util.Tier$;
 import totoro.ocelot.brain.workspace.Workspace;
+import totoro.ocelot.brain.entity.machine.Arguments;
+import totoro.ocelot.brain.entity.machine.Callback;
+import totoro.ocelot.brain.entity.machine.Context;
+import totoro.ocelot.brain.event.Event;
+import totoro.ocelot.brain.event.EventBus$;
+import totoro.ocelot.brain.network.Component;
+import totoro.ocelot.brain.network.Network;
+import totoro.ocelot.brain.network.Visibility$;
 
 public class NexusHeadless {
     static final int TICK_MS_DEFAULT = 50;
@@ -41,6 +49,10 @@ public class NexusHeadless {
     static int tickMs = TICK_MS_DEFAULT;
     static double defaultWait = 30;
     static String script = null;
+    static String ocelotLog = null;   // --ocelot-log TARGET
+    static String serialLog = null;   // --serial TARGET
+    static int netconsolePort = -1;   // --netconsole PORT[:TARGET]
+    static String netconsoleLog = "-";
 
     static void usage(String error) {
         if (error != null) System.err.println("nexus-headless: " + error);
@@ -54,6 +66,10 @@ public class NexusHeadless {
             "  --internet          add an internet card",
             "  --screen-tier 1-3   screen and GPU tier (default 3)",
             "  --tick-ms N         real milliseconds per 1/20 s tick (default 50; lower runs faster)",
+            "  --ocelot-log T      add an Ocelot card; its log() lines go to T (a file, or - for stdout)",
+            "  --serial T          add a serial port (component \"serial\"); what is written goes to T",
+            "  --netconsole P[:T]  listen on 127.0.0.1:P and write what TCP clients send to T (default -);",
+            "                      adds an internet card allowed to reach localhost",
             "  --wait-timeout S    default timeout of `wait` in seconds (default 30)",
             "script commands, one per line (# starts a comment):",
             "  wait \"text\" [S]     until the screen shows text (fails after S seconds)",
@@ -63,6 +79,7 @@ public class NexusHeadless {
             "                      right home end pageup pagedown escape, or ctrl+c and the like",
             "  sleep S             let S seconds of machine time pass",
             "  screen              print the screen",
+            "  wait-log \"text\" [S] until the debug output (Ocelot card, serial, netconsole) shows text",
             "  expect \"text\"       fail unless the screen shows text now",
             "  refuse \"text\"       fail if the screen shows text now",
             "  running             fail unless the machine is running",
@@ -85,6 +102,16 @@ public class NexusHeadless {
                 case "--screen-tier": screenTier = Integer.parseInt(next(args, ++i, a)); break;
                 case "--tick-ms": tickMs = Integer.parseInt(next(args, ++i, a)); break;
                 case "--wait-timeout": defaultWait = Double.parseDouble(next(args, ++i, a)); break;
+                case "--ocelot-log": ocelotLog = next(args, ++i, a); break;
+                case "--serial": serialLog = next(args, ++i, a); break;
+                case "--netconsole": {
+                    String v = next(args, ++i, a);
+                    int colon = v.indexOf(':');
+                    netconsolePort = Integer.parseInt(colon < 0 ? v : v.substring(0, colon));
+                    if (colon >= 0) netconsoleLog = v.substring(colon + 1);
+                    internet = true;
+                    break;
+                }
                 case "-h": case "--help": usage(null); break;
                 default:
                     if (a.startsWith("--")) usage("unknown option " + a);
@@ -125,6 +152,139 @@ public class NexusHeadless {
         return args[i];
     }
 
+    // ---------------------------------------------------------------- debug output
+
+    // Everything the debug outputs received, for wait-log.
+    static final StringBuffer debugOutput = new StringBuffer();
+
+    // A target: "-" writes prefixed lines to stdout, anything else appends
+    // the raw text to that file.
+    static final class Sink {
+        final String prefix;
+        final Writer file;
+        final StringBuilder partial = new StringBuilder();
+
+        Sink(String prefix, String target) {
+            this.prefix = prefix;
+            try {
+                this.file = target.equals("-") ? null
+                    : new OutputStreamWriter(new FileOutputStream(target, true), StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        synchronized void write(String text) {
+            debugOutput.append(text);
+            try {
+                if (file != null) {
+                    file.write(text);
+                    file.flush();
+                    return;
+                }
+            } catch (IOException e) {
+                System.err.println("nexus-headless: " + prefix + ": " + e.getMessage());
+                return;
+            }
+            partial.append(text);
+            int nl;
+            while ((nl = partial.indexOf("\n")) >= 0) {
+                System.out.println(prefix + "| " + partial.substring(0, nl));
+                partial.delete(0, nl + 1);
+            }
+            System.out.flush();
+        }
+    }
+
+    static Sink ocelotSink, serialSink, netSink;
+
+    // A serial port: component "serial" with write(data). Built on Keyboard,
+    // a component without callbacks of its own.
+    public static class SerialPort extends Keyboard {
+        private Component serialNode;
+
+        @Override
+        public Component node() {
+            if (serialNode == null) {
+                serialNode = Network.newNode(this, Visibility$.MODULE$.Neighbors(), Network.newNode$default$3())
+                    .withComponent("serial", Visibility$.MODULE$.Neighbors())
+                    .create();
+            }
+            return serialNode;
+        }
+
+        @Callback(direct = true, doc = "function(data:string):number -- Writes data to the serial port.")
+        public Object[] write(Context context, Arguments args) {
+            byte[] data = args.checkByteArray(0);
+            if (serialSink != null) serialSink.write(new String(data, StandardCharsets.UTF_8));
+            return new Object[] { data.length };
+        }
+    }
+
+    // log() lines of the Ocelot card arrive as events on the brain's bus.
+    static final class OcelotLogListener extends scala.runtime.AbstractPartialFunction<Event, scala.runtime.BoxedUnit> {
+        @Override
+        public boolean isDefinedAt(Event e) {
+            return e.getClass().getName().endsWith("LogEvent$CardToUser");
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <A1 extends Event, B1> B1 applyOrElse(A1 e, scala.Function1<A1, B1> fallback) {
+            if (!isDefinedAt(e)) return fallback.apply(e);
+            try {
+                String message = (String) e.getClass().getMethod("message").invoke(e);
+                if (ocelotSink != null) ocelotSink.write(message + "\n");
+            } catch (ReflectiveOperationException ex) {
+                System.err.println("nexus-headless: ocelot log: " + ex);
+            }
+            return (B1) scala.runtime.BoxedUnit.UNIT;
+        }
+    }
+
+    // The netconsole: a TCP server on localhost; each line a client sends
+    // goes to the sink.
+    static void startNetconsole() throws IOException {
+        java.net.ServerSocket server = new java.net.ServerSocket(netconsolePort, 8, java.net.InetAddress.getLoopbackAddress());
+        netSink = new Sink("tcp", netconsoleLog);
+        Thread acceptor = new Thread(() -> {
+            while (true) {
+                try {
+                    java.net.Socket client = server.accept();
+                    Thread reader = new Thread(() -> {
+                        try (InputStream in = client.getInputStream()) {
+                            byte[] buf = new byte[4096];
+                            int n;
+                            while ((n = in.read(buf)) > 0) netSink.write(new String(buf, 0, n, StandardCharsets.UTF_8));
+                        } catch (IOException ignored) {
+                        }
+                    });
+                    reader.setDaemon(true);
+                    reader.start();
+                } catch (IOException e) {
+                    return;
+                }
+            }
+        });
+        acceptor.setDaemon(true);
+        acceptor.start();
+    }
+
+    // The brain's configuration with the internet card allowed to reach
+    // 127.0.0.1 (OC denies private addresses by default).
+    static Path internetConfig(Path dir) throws IOException {
+        String conf;
+        try (InputStream in = NexusHeadless.class.getClassLoader().getResourceAsStream("application.conf")) {
+            if (in == null) throw new IOException("application.conf not found in the jar");
+            conf = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        // "allow default" itself denies private addresses: allow loopback first
+        conf = conf.replace("\"removeme\",", "\"allow ip:127.0.0.1\",");
+        Path file = dir.resolve("brain.conf");
+        Files.write(file, conf.getBytes(StandardCharsets.UTF_8));
+        return file;
+    }
+
     // ---------------------------------------------------------------- machine
 
     static Workspace workspace;
@@ -139,7 +299,9 @@ public class NexusHeadless {
     static void build() throws IOException {
         Path work = Files.createTempDirectory("nexus-headless");
         Ocelot.librariesPath_$eq(Option.apply(work));
+        if (internet) Ocelot.configPath_$eq(Option.apply(internetConfig(work)));
         Ocelot.initialize();
+        if (netconsolePort >= 0) startNetconsole();
         workspace = new Workspace(work);
         computer = workspace.add(new Case(Tier$.MODULE$.Three()));
 
@@ -154,6 +316,15 @@ public class NexusHeadless {
         if (dataCard == 2) parts.add(new DataCard.Tier2());
         if (dataCard == 3) parts.add(new DataCard.Tier3());
         if (internet) parts.add(new InternetCard());
+        if (ocelotLog != null) {
+            ocelotSink = new Sink("ocelot", ocelotLog);
+            EventBus$.MODULE$.subscribe(new OcelotLogListener());
+            parts.add(new ocelot.desktop.entity.OcelotCard());
+        }
+        if (serialLog != null) {
+            serialSink = new Sink("serial", serialLog);
+            parts.add(new SerialPort());
+        }
         List<HDDManaged> hdds = new ArrayList<>();
         for (Path d : disks) {
             HDDManaged hdd = new HDDManaged(Tier$.MODULE$.Three());
@@ -394,6 +565,16 @@ public class NexusHeadless {
                     break;
                 }
                 case "screen": printScreen(w.size() > 1 ? w.get(1) : "screen"); break;
+                case "wait-log": {
+                    need(w, 2);
+                    double deadline = now() + seconds(w, 2, defaultWait);
+                    while (debugOutput.indexOf(w.get(1)) < 0) {
+                        checkCrash();
+                        if (now() >= deadline) fail("timed out waiting for \"" + w.get(1) + "\" in the debug output");
+                        tick();
+                    }
+                    break;
+                }
                 case "expect": need(w, 2); if (!shows(w.get(1))) fail("screen does not show \"" + w.get(1) + "\""); break;
                 case "refuse": need(w, 2); if (shows(w.get(1))) fail("screen shows \"" + w.get(1) + "\""); break;
                 case "running": checkCrash(); if (!computer.machine().isRunning()) fail("the machine is not running"); break;
