@@ -67,8 +67,6 @@ end
 ---@type util
 util = util
 
----@type event
-local event
 
 ---@type signal
 signals = {

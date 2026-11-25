@@ -1,17 +1,15 @@
 ---@class vfs : openos_fs
 vfs = {}
--- Kernel-only vnode access. A chunk-level local: other kernel sources see it,
--- but it is never part of the `vfs` table handed to userland and modules,
+-- Kernel-only vnode access, shared with other kernel sources through
+-- prelude.lua; never part of the `vfs` table handed to userland and modules,
 -- which must not obtain vnodes (their .fs is a raw filesystem proxy).
-local vfsk = {}
+vfsk = {}
 ---@type table<integer, vnode>
 local vtab = {}
 ---@type table<string, vfs_descriptor>
-local vhandles = {}
+vhandles = {}
 ---@type table<table, boolean>
 local openDescriptions = {}
----@type devfs
-local devfs
 
 ---@class vnode
 ---@field name string
@@ -206,7 +204,7 @@ end
 
 ---@param fd any
 ---@return table|nil description
-local function descriptor(fd)
+function descriptor(fd)
     if math.type(fd) ~= "integer" or fd < 0 then return nil end
     return fdTable()[fd + 1]
 end

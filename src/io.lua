@@ -1,5 +1,5 @@
 ---@class io
-local io = {}
+io = {}
 
 -- io functions act on descriptors 0/1/2 of the calling process
 local function joinArgs(...)

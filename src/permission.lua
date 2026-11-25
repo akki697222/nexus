@@ -1,5 +1,5 @@
 ---@class permission
-local permission = {}
+permission = {}
 
 local function band(a, b)
     if _VERSION == "Lua 5.3" or _VERSION == "Lua 5.4" then

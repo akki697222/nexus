@@ -3,7 +3,6 @@ local file = assert(io.open("src/vfs.lua", "r"))
 local source = file:read("*a")
 file:close()
 -- Expose the kernel-only descriptor helpers to this isolated test chunk.
-source = assert(source:gsub("local vfsk = {}", "vfsk = {}", 1))
 
 local saved = {}
 for _, name in ipairs({ "vfs", "vfsk", "process", "config", "fnv1a_hash", "devfs" }) do

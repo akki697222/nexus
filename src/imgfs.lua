@@ -9,7 +9,7 @@
 -- block cache; the TOC is the only per-file state kept in memory.
 
 ---@class imgfs
-local imgfs = {}
+imgfs = {}
 
 imgfs.SECTION = { kernel = 1, usr = 2, etc = 3 }
 imgfs.CACHE_BLOCKS = 2

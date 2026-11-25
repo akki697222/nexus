@@ -1,5 +1,5 @@
 ---@class procfs : oc_component_fs
-local procfs = {}
+procfs = {}
 procfs.dynamic = true 
 
 local virtual_files = {}

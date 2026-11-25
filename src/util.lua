@@ -1,5 +1,5 @@
 ---@class util
-local util = {}
+util = {}
 
 function util.encodeTable(tbl, noreturn)
     local buffer = {}

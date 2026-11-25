@@ -20,10 +20,6 @@ local handles = {}
 -- handles 0-2 are the console descriptors (see devfs.init)
 local next_handle = 3
 
----@type module
-local module
----@type system
-local system
 
 function devfs.init()
     -- The console descriptors. Their vnode (the console node) only exists once

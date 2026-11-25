@@ -51,52 +51,9 @@ for i = 1, #arg do
     end
 end
 
-local t = os.date("!*t")
-
-local wdays = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }
-local months = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
-
-local ftime = string.format("%s %s %02d %02d:%02d:%02d UTC %d",
-    wdays[t.wday],
-    months[t.month],
-    t.day,
-    t.hour,
-    t.min,
-    t.sec,
-    t.year
-)
-
-local source = ""
-source = source .. "-- " .. props.buildOutput .. " - built on " .. ftime .. "\n"
-source = source .. "-- Copyright (c) 2026 akki697222\n"
-source = source .. "-- Released under the MIT license\n"
-source = source .. "-- https://opensource.org/licenses/mit-license.php\n"
-for index, value in ipairs(props.includes) do
-    print("Include: " .. props.includeDir .. "/" .. value)
-    local path = props.includeDir .. "/" .. value
-    source = source .. "\n-- The source included from " .. path .. "\n"
-    local file = io.open(path, "r")
-    if not file then
-        error("Failed to open file " .. path)
-    end
-    for line in file:lines("L") do
-        if not line:match("^%-%-%-") then
-            source = source .. line
-        end
-    end
-    file:close()
-end
-
-local outputFile = props.buildDir .. "/" .. props.buildOutput
-
-local outFile = io.open(outputFile, "w+")
-if not outFile then
-    error("Failed to open output file " .. outputFile)
-end
-
-outFile:write(source)
-outFile:close()
+-- kernel: src/ joined into build/kernel.lua (tools/kbuild.lua, any OS)
+local outputFile = assert(loadfile("tools/kbuild.lua"))().build(props)
+print("Kernel: " .. outputFile)
 
 if props.minify then
     os.execute("luamin -f "..outputFile.." > .tmp && move /Y .tmp "..outputFile)
@@ -216,4 +173,4 @@ if deployImages then
     end
 end
 
-print("Build complete!")
+print("Build complete!")

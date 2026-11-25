@@ -17,7 +17,7 @@ local env = setmetatable({
 }, { __index = _G })
 
 local source = read("src/klog.lua") .. "\n"
-    .. read("src/fbcon.lua"):gsub("^local vfs\n", "local vfs = _ENV.vfs\n", 1)
+    .. read("src/fbcon.lua")
     .. "\nreturn fbcon, klog"
 local fbcon, klog = assert(load(source, "=printk", "t", env))()
 

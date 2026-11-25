@@ -6,6 +6,9 @@ properties.buildOutput = "kernel.lua"
 properties.buildVersion = "0.0.7"
 -- include settings
 properties.includeDir = "src"
+-- the names sources share; joined first and as it is (tools/kbuild.lua)
+properties.prelude = "prelude.lua"
+-- each joined in a do ... end block of its own, in this order
 properties.includes = {
     "base.lua",
     "sha2.lua",

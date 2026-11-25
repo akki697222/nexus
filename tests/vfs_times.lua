@@ -4,7 +4,6 @@
 local f = assert(io.open("src/vfs.lua", "r"))
 local source = f:read("*a")
 f:close()
-source = assert(source:gsub("local vfsk = {}", "vfsk = {}", 1))
 
 local saved = {}
 for _, name in ipairs({ "vfs", "vfsk", "process", "config", "fnv1a_hash", "devfs",
@@ -33,7 +32,6 @@ getRealTime = os.time
 local pf = assert(io.open("src/permission.lua", "r"))
 local permissionSource = pf:read("*a")
 pf:close()
-permissionSource = assert(permissionSource:gsub("local permission = {}", "permission = {}", 1))
 assert(load(permissionSource, "src/permission.lua"))()
 devfs = { close = function() end }
 

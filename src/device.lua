@@ -1,5 +1,5 @@
 ---@class device
-local device = {}
+device = {}
 ---@type table<string, device_manifest>
 local system_devices = {}
 local deviceNodes = {}

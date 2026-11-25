@@ -1,9 +1,6 @@
-local vfs
-local runProcessQueue = function(event)end
-local resumeKernelThreads = function()end
 
 ---@class fbcon : console_device
-local fbcon = {
+fbcon = {
     gpu = nil,
     width = 0,
     height = 0,
