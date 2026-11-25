@@ -86,9 +86,24 @@ function disk.writeAll(fs, path, data)
 end
 
 -- Writes path through path.new, so an interrupted write leaves the old file.
+-- A file that is still open somewhere cannot be removed on a Windows host
+-- (boot menus that leave /init.lua open after booting it, for one); it is
+-- then overwritten in place, which Windows allows.
 function disk.replace(fs, path, data)
     disk.writeAll(fs, path .. ".new", data)
-    if fs.exists(path) and not fs.remove(path) then error("cannot remove " .. path, 0) end
+    if fs.exists(path) and not fs.remove(path) then
+        local handle = fs.open(path, "wb")
+        if not handle then
+            fs.remove(path .. ".new")
+            error("cannot replace " .. path .. ": it can be neither removed nor written", 0)
+        end
+        local ok, err = true, nil
+        if #data > 0 then ok, err = fs.write(handle, data) end
+        fs.close(handle)
+        if not ok then error("cannot write " .. path .. ": " .. tostring(err), 0) end
+        fs.remove(path .. ".new")
+        return
+    end
     if not fs.rename(path .. ".new", path) then error("cannot rename " .. path .. ".new", 0) end
 end
 

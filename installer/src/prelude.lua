@@ -25,7 +25,7 @@
 -- Raised when a manifest needs a newer installer; bump with any change the
 -- release files depend on.
 local INSTALLER_REV = 1
-local CHANNEL_URL = "https://raw.githubusercontent.com/akki697222/nexus/main/dist/channel.lua"
+local CHANNEL_URL = "https://raw.githubusercontent.com/akki697222/nexus/dev-oc/dist/channel.lua"
 local CHANNEL = "stable"
 -- on the target: bundled files, answers, the kept /init.lua, downloads
 local STAGE = "/.nexus-install"

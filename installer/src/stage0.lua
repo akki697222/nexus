@@ -109,6 +109,16 @@ local function findTarget(name, boot)
 end
 
 function stage0.main(args)
+    -- failures inside (a full disk, a file that cannot be written) are shown
+    -- as a message, not a traceback
+    local ok, result = xpcall(stage0.run, debug.traceback, args)
+    if ok then return result end
+    if type(result) ~= "string" then error(result, 0) end
+    io.stderr:write("nexus-install: " .. (result:match("^[^\n]*") or "?") .. "\n")
+    return 1
+end
+
+function stage0.run(args)
     local function fail(message)
         io.stderr:write("nexus-install: " .. tostring(message) .. "\n")
         return 1

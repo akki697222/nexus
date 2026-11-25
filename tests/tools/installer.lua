@@ -36,6 +36,15 @@ local manifest = assert(load(rel["manifest.lua"], "=manifest", "t", {}))()
 assert(manifest.format == 1 and manifest.installer == 1 and #manifest.groups >= 2)
 local selfPath = dist .. "/nexus-install.lua"
 
+-- dist/nexus-install.lua is what users wget (raw.githubusercontent.com does
+-- not redirect, GitHub release downloads do): it must be the current build
+do
+    local f = assert(io.open("dist/nexus-install.lua", "rb"), "dist/nexus-install.lua is missing")
+    local committed = f:read("a"):gsub("\r\n", "\n")
+    f:close()
+    assert(committed == installer, "dist/nexus-install.lua is out of date: lua tools/mkinstaller.lua dist/nexus-install.lua")
+end
+
 -- what the rootfs holds, to compare the installed files with
 local rootfsInfo = nximg.parseHeader(rel.rootfs)
 local inflate = function(z) return LD:DecompressZlib(z) end
@@ -228,7 +237,7 @@ do
 end
 
 -- 4. Online: the channel names the release; the files are downloaded.
-local CHANNEL = "https://raw.githubusercontent.com/akki697222/nexus/main/dist/channel.lua"
+local CHANNEL = "https://raw.githubusercontent.com/akki697222/nexus/dev-oc/dist/channel.lua"
 local function pages(base, files)
     local t = { [CHANNEL] = 'return { format = 1, base = "https://example.test/download/%s", '
         .. 'channels = { stable = "v9" } }' }
@@ -268,6 +277,81 @@ do
     assert(m.env.UPDATED_WITH == "--updated", "the new installer ran")
     assert(hdd.get("/init.lua") == newer, "and boots next time")
     assert(hdd.get("/.nexus-install/answers.lua"), "nothing was installed yet")
+end
+
+-- 4b. A card that does not follow redirects (OpenComputers Rebooted): the
+--     release downloads answer 302, as GitHub's do, to absolute and
+--     relative locations with any header case.
+do
+    local hdd = oc.filesystem("c5-hdd")
+    local _, ok, code = stage0(hdd, { hdd }, "--no-reboot", "--unattended", "--user", "carol",
+        "--password-hash", shadowHash("pw"), "--from", "https://github.test/download/v9")
+    assert(ok and code == 0)
+    local p = {}
+    for name, data in pairs(rel) do
+        p["https://github.test/download/v9/" .. name] = { redirect = "https://objects.test/a/" .. name,
+            header = name == "rootfs" and "location" or "Location" }
+        p["https://objects.test/a/" .. name] = { redirect = "/b/" .. name }
+        p["https://objects.test/b/" .. name] = data
+    end
+    local inet = oc.internet(p)
+    local m = bios(hdd, { hdd, inet, oc.data(inflate) })
+    local ok2, why = m.run(installer)
+    assert(not ok2 and why == "reboot", tostring(why))
+    assert(inet.requests[3] == "https://objects.test/b/manifest.lua", tostring(inet.requests[3]))
+    checkInstalled(hdd, "carol", "pw")
+
+    -- a redirect loop is reported, nothing is erased
+    hdd = oc.filesystem("c6-hdd")
+    _, ok, code = stage0(hdd, { hdd }, "--no-reboot", "--unattended", "--user", "carol",
+        "--password-hash", shadowHash("pw"), "--from", "https://loop.test")
+    assert(ok and code == 0)
+    hdd.put("/keep.txt", "still here")
+    m = bios(hdd, { hdd, oc.internet({ ["https://loop.test/manifest.lua"] = { redirect = "https://loop.test/manifest.lua" } }) })
+    ok2, why = m.run(installer)
+    assert(not ok2 and tostring(why):find("too many redirects", 1, true), tostring(why))
+    assert(hdd.get("/keep.txt") == "still here")
+end
+
+-- 4c. /init.lua left open by the boot menu that booted it, on a Windows
+--     host: it cannot be removed, so stage0, stage1 and Cancel overwrite it.
+do
+    local hdd = oc.filesystem("c7-hdd")
+    hdd.put("/init.lua", "-- the old OS\n")
+    hdd.locked["/init.lua"] = true
+    local _, ok, code = stage0(hdd, { hdd }, "--from", dist, "--no-reboot")
+    assert(ok and code == 0, tostring(code))
+    assert(hdd.get("/init.lua") == installer and not hdd.proxy.exists("/init.lua.new"))
+    local gpu = oc.gpu()
+    local m = bios(hdd, { hdd, gpu, oc.screen() })
+    m.keys("down", "enter", "y")
+    local ok2, why = m.run(installer)
+    assert(not ok2 and why == "reboot", tostring(why))
+    assert(hdd.get("/init.lua") == "-- the old OS\n", "Cancel restores it")
+
+    _, ok, code = stage0(hdd, { hdd }, "--from", dist, "--no-reboot", "--unattended", "--user", "bob",
+        "--password-hash", shadowHash("secret"))
+    assert(ok and code == 0, tostring(code))
+    m = bios(hdd, { hdd })
+    ok2, why = m.run(installer)
+    assert(not ok2 and why == "reboot", tostring(why))
+    checkInstalled(hdd, "bob", "secret")
+    assert(not hdd.proxy.exists("/init.lua.new"))
+
+    -- stage0 reports a failure as a message
+    local ro = oc.filesystem("c8-hdd")
+    ro.put("/init.lua", "x")
+    ro.locked["/init.lua"] = true
+    ro.failWrites = "^/init%.lua$"
+    local errors = {}
+    local m0 = oc.machine({ boot = ro, components = { ro }, os = true, chunkname = "=" .. selfPath })
+    m0.env.io = { stderr = { write = function(_, s) errors[#errors + 1] = s end }, open = io.open,
+        write = function() end, read = function() end }
+    m0.env.print = function() end
+    local okm, codem = m0.run(installer, "--no-reboot")
+    assert(okm and codem == 1 and errors[1] == "nexus-install: cannot replace /init.lua: it can be "
+        .. "neither removed nor written\n", tostring(errors[1]))
+    assert(ro.get("/init.lua") == "x" and not ro.proxy.exists("/init.lua.new"))
 end
 
 -- 5. Cancel puts the old system back, boot disk included.

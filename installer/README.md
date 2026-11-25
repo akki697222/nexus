@@ -31,13 +31,20 @@ The installer is one file, `nexus-install.lua`, in two stages:
 With an internet card:
 
 ```sh
-wget -f https://github.com/akki697222/nexus/releases/download/v0.0.8/nexus-install.lua /tmp/nexus-install.lua
+wget -f https://raw.githubusercontent.com/akki697222/nexus/dev-oc/dist/nexus-install.lua /tmp/nexus-install.lua
 /tmp/nexus-install.lua
 ```
 
-The installer takes the release that `dist/channel.lua` on the main branch
-names (`stable`), so an older copy still installs the current release; when
-the release has a newer installer, it updates itself first.
+The installer takes the release that `dist/channel.lua` on the default
+branch (`dev-oc`) names (`stable`), so an older copy still installs the
+current release; when the release has a newer installer, it updates itself
+first.
+
+The first download comes from `raw.githubusercontent.com` on purpose:
+GitHub's release downloads always answer with a redirect, and some internet
+cards (OpenComputers Rebooted) and OpenOS's `wget` do not follow redirects,
+which leaves an empty file. The installer follows them itself for the
+release files.
 
 ### Offline
 
@@ -114,11 +121,15 @@ lua tools/nximg.lua media build/dist build/media
 | `nexus-install.lua` | the installer, joined from `installer/src` by `tools/mkinstaller.lua` |
 | `manifest.lua`      | version, installer revision, sizes, CRC-32s, optional groups |
 
+`dist/nexus-install.lua` is the same installer, kept in the repository for
+the `wget` above; rebuild it with any change to the installer
+(`lua tools/mkinstaller.lua dist/nexus-install.lua`; a test checks it).
+
 Optional groups are `installer/groups.lua` (the debug tools) and one per
 driver in `drivers.idx`; leaving one out also drops its lines from
 `/etc/modules.lua` and `drivers.idx`. After publishing a release, set its
-tag in `dist/channel.lua` on the main branch; the online installer reads
-it from there (GitHub's `releases/latest` skips pre-releases).
+tag in `dist/channel.lua` on `dev-oc`; the online installer reads it from
+there (GitHub's `releases/latest` skips pre-releases).
 
 `INSTALLER_REV` in `installer/src/prelude.lua` is the installer's revision.
 Raise it when a release needs a newer installer; older installers update

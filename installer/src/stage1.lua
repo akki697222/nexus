@@ -150,7 +150,7 @@ end
 -- the message of an error, without the traceback and source position
 local function errorText(err)
     local line = tostring(err):match("^[^\n]*")
-    return (line:gsub("^[^:]*nexus%-install%.lua:%d+: ", ""))
+    return (line:gsub("^[^:]+:%d+: ", ""))
 end
 
 -- After a failure: try again, go back, put the old system back, or stop.

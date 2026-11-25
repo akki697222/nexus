@@ -67,9 +67,12 @@ function oc.filesystem(address, opts)
         table.sort(out)
         return out
     end
+    -- t.locked[path]: the file is open elsewhere and the host is Windows:
+    -- it can be written but not removed or renamed over
+    t.locked = {}
     function p.remove(path)
         path = norm(path)
-        if t.readOnly then return false end
+        if t.readOnly or t.locked[path] then return false end
         if t.files[path] then t.files[path] = nil return true end
         if t.dirs[path] and path ~= "/" then
             local prefix = path .. "/"
@@ -92,8 +95,8 @@ function oc.filesystem(address, opts)
         if mode:find("[wa]") then
             if t.readOnly then return nil, "read-only" end
             if t.dirs[path] or not t.dirs[parentOf(path)] then return nil, path .. ": no such directory" end
-            if mode:find("w") or not t.files[path] then t.files[path] = "" end
             if t.failWrites and path:match(t.failWrites) then return nil, "injected failure" end
+            if mode:find("w") or not t.files[path] then t.files[path] = "" end
         elseif not t.files[path] then
             return nil, path
         end
@@ -187,7 +190,10 @@ function oc.screen()
     return { address = "screen", type = "screen", proxy = { address = "screen", type = "screen" } }
 end
 
--- An internet card; pages[url] is the body (a missing url answers 404).
+-- An internet card; pages[url] is the body (a missing url answers 404),
+-- or { redirect = url, header = "Location" } for a 302 the card does not
+-- follow. response() has no status on its first call, as a real card
+-- before the headers arrive.
 function oc.internet(pages)
     local t = { address = "inet", type = "internet", pages = pages, requests = {} }
     local p = { address = "inet", type = "internet" }
@@ -197,9 +203,21 @@ function oc.internet(pages)
         local body = pages[url]
         local pos = 0
         local h = {}
+        local asked = false
         function h.finishConnect() return true end
-        function h.response() if body then return 200, "OK" end return 404, "Not Found" end
+        function h.response()
+            if not asked then
+                asked = true
+                return nil
+            end
+            if type(body) == "table" then
+                return 302, "Found", { [body.header or "Location"] = { body.redirect } }
+            end
+            if body then return 200, "OK" end
+            return 404, "Not Found"
+        end
         function h.read(n)
+            if type(body) == "table" then return nil end
             if not body then return nil, "404" end
             if pos >= #body then return nil end
             local chunk = body:sub(pos + 1, pos + math.min(n, 4096))
