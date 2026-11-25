@@ -28,7 +28,7 @@ depmod.CORE_TYPES = {
     keyboard = true, eeprom = true, computer = true,
 }
 
--- device_type vocabulary of src/device.lua
+-- device_type vocabulary of src/dev/device.lua
 depmod.CLASSES = {
     volume = true, processor = true, data = true, display = true, input = true,
     system = true, communication = true, memory = true, eeprom = true,

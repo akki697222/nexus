@@ -6,7 +6,7 @@
 --
 --   lua security/poc/selftest.lua
 --
--- The NX-17 check copies the same lock() shape as src/env.lua and shows that
+-- The NX-17 check copies the same lock() shape as src/kernel/env.lua and shows that
 -- rawset() on the shared proxy changes what sudo.lua sees. The NX-16 check
 -- round-trips the .meta line format and the setuid decision in process.exec().
 
@@ -18,7 +18,7 @@ local function read(path)
 end
 
 local function check_nx16()
-    local permission = assert(load(read("src/permission.lua") .. "\nreturn permission"))()
+    local permission = assert(load(read("src/sec/permission.lua") .. "\nreturn permission"))()
 
     local function write_line(name, vtype, hash, mtime, btime, mode, refcount, uid, gid, link)
         return string.format("%s:%s:%d:%d:%d:%d:%d:%d:%d:%s",
@@ -42,7 +42,7 @@ local function check_nx16()
     assert(permission.canSetUID(parsed.mode), "4755 must set the setuid bit")
     assert(permission.canOtherExec(parsed.mode), "4755 must be executable by others")
 
-    -- src/process.lua L283-286: the setuid bit selects the file owner as euid.
+    -- src/proc/process/spawn.lua (exec): the setuid bit selects the file owner as euid.
     local euid = 100
     if permission.canSetUID(parsed.mode) then euid = parsed.uid end
     assert(euid == 0, "exec must switch euid to the forged owner")
@@ -54,7 +54,7 @@ local function check_nx17()
     local sudo_source = read("root/usr/bin/sudo.lua")
     local argparse_source = read("root/usr/lib/argparse.lua")
 
-    -- Same shape as src/env.lua lock().
+    -- Same shape as src/kernel/env.lua lock().
     local function lock(tbl, name)
         return setmetatable({}, {
             __metatable = name,

@@ -24,31 +24,29 @@ A Unix-like monolithic kernel that works perfectly on OpenComputers. Nexus provi
 
 Nexus is organized as a monolithic kernel with clear separation of concerns:
 
-### Core Modules (`src/` directory)
-- **base.lua** - Core runtime environment and logging
-- **main.lua** - Kernel entry point and initialization
-- **vfs.lua** - Virtual filesystem with vnode implementation
-- **devfs.lua** - Device filesystem for hardware access
-- **device.lua** - Device abstraction and management
-- **module.lua** - Module loading and lifecycle management
-- **process.lua** - Process/task management and scheduling
-- **thread.lua** - Coroutine-based threading
-- **event.lua** - Event bus and handler system
-- **io.lua** - Input/output operations
-- **fbcon.lua** - Framebuffer console for graphics output
-- **os.lua** - OS-level utilities and functions
-- **system.lua** - System information and configuration
-- **package.lua** - Lua package/module loader integration
-- **permission.lua** - Permission checking and enforcement
-- **user.lua** - User account management
-- **group.lua** - Group management
-- **procfs.lua** - Process filesystem (virtual proc directory)
-- **util.lua** - Utility functions
-- **sha2.lua** - SHA-2 cryptographic hashing
+### Kernel sources (`src/`)
+
+`properties.lua` lists the sources in build order. `tools/kbuild.lua` joins
+them into `build/kernel.lua`: `src/prelude.lua` first (the names sources
+share), then every source in a `do ... end` block of its own.
+
+- **`kernel/`** - boot and entry point (`base.lua`, `main.lua`), kernel log
+  (`klog.lua`), console (`fbcon.lua`), debug consoles (`debugcon.lua`),
+  system calls (`system.lua`), process environments (`env.lua`)
+- **`lib/`** - utilities (`util.lua`), SHA-2 (`sha2.lua`)
+- **`sec/`** - permissions, users, groups, the access policy
+- **`fs/`** - the virtual filesystem (`vfs/`: vnodes, descriptors, paths,
+  mounts, operations, metadata, pipes and I/O) and devfs, procfs, imgfs
+- **`proc/`** - processes (`process/`: queues, spawn, signals, blocking, the
+  scheduler pass), threads, events, kernel modules
+- **`dev/`** - devices and the driver manager
+- **`api/`** - `io`, `os` and `package` as userland sees them
 
 ## Building
 
-The kernel is built from source files in `src/` using `build.lua`. This generates `build/kernel.lua`, which contains the concatenated kernel code.
+`lua tools/kbuild.lua` (any OS, Lua 5.3+) writes `build/kernel.lua`;
+`build.bat` does that and deploys to the test disks. Tests:
+`lua tests/run.lua`.
 
 ## Important Notes
 

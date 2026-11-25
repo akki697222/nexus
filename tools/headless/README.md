@@ -50,7 +50,7 @@ prefixed `ocelot|`, `serial|` or `tcp|`.
 
 ## Debug output
 
-The kernel's debug consoles (`src/debugcon.lua`, `debug_console` in
+The kernel's debug consoles (`src/kernel/debugcon.lua`, `debug_console` in
 `/boot/config.lua`) send every kernel log line to an Ocelot card, a serial
 port and a TCP server, from the first boot line on, panics included. Here:
 
