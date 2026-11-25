@@ -325,5 +325,19 @@ fsA.close(badHandle)
 none, noneErr = imgfs.open("disk-a", "/boot/bad", imgfs.SECTION.usr)
 assert(not none and noneErr:find("not a Nexus boot image", 1, true))
 
+-- 4. The image replaced under a mounted section: reads fail with an error
+--    for the caller (the shell must survive running a command from /usr).
+do
+    local live = assert(imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr))
+    local swap = assert(fsA.open("/boot/nexusos", "w"))
+    fsA.write(swap, ("x"):rep(#image))
+    fsA.close(swap)
+    local lh = assert(live.open("/lib/big.txt", "rb"))
+    assert(live.seek(lh, "set", #big - 10))
+    local data, readErr = live.read(lh, 10)
+    assert(data == nil and tostring(readErr):find("imgfs:", 1, true), tostring(readErr))
+    live.close(lh)
+end
+
 for name, value in pairs(saved) do _G[name] = value end
 io.write("imgfs tests passed\n")

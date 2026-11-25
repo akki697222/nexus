@@ -272,7 +272,11 @@ function imgfs.open(address, imagePath, sectionType)
             -- materializes more than a block of a large file
             local absolute = h.node.offset + h.pos
             local untilBlockEnd = blockSize - absolute % blockSize
-            data = readRange(absolute, math.min(count, untilBlockEnd))
+            -- a damaged or replaced image is a read error for the caller,
+            -- not an error raised in its process
+            local ok, result = pcall(readRange, absolute, math.min(count, untilBlockEnd))
+            if not ok then return nil, tostring(result) end
+            data = result
         end
         h.pos = h.pos + #data
         return data
