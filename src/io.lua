@@ -57,6 +57,37 @@ function io.open(path, mode)
     return vfs.open(path, mode)
 end
 
+-- Like Lua's io.lines(path, ...): the lines (or other formats) of a file,
+-- closed when the iteration ends; without a path, of standard input.
+function io.lines(path, ...)
+    local formats = table.pack(...)
+    if formats.n == 0 then formats = { "l", n = 1 } end
+    if path == nil then
+        return function()
+            local values = {}
+            for i = 1, formats.n do
+                local value = vfs.read(0, formats[i])
+                if value == nil then return table.unpack(values, 1, i - 1) end
+                values[i] = value
+            end
+            return table.unpack(values, 1, formats.n)
+        end
+    end
+    local file, err = vfs.open(path, "r")
+    if not file then error(tostring(path) .. ": " .. tostring(err), 2) end
+    local nextValues = file:lines(table.unpack(formats, 1, formats.n))
+    local done = false
+    return function()
+        if done then return nil end
+        local values = table.pack(nextValues())
+        if values[1] == nil then
+            done = true
+            file:close()
+        end
+        return table.unpack(values, 1, values.n)
+    end
+end
+
 ---@param prog string
 ---@param mode string
 ---@return table|nil

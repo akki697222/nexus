@@ -57,7 +57,7 @@ local function newSystem(passwd)
             local data = sys.files[path]
             if not data then return nil, path .. ": No such file or directory" end
             local pos = 1
-            -- like Nexus file handles: read("*l"/"l"/"*a"/"a"), no :lines()
+            -- read("*l"/"l"/"*a"/"a") only, so the code under test must not need :lines()
             return {
                 read = function(_, fmt)
                     fmt = fmt or "*l"

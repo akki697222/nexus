@@ -346,6 +346,53 @@ local rootMetadata = "\n" .. assert(fsA.content("/.meta"))
 assert(rootMetadata:find("\nattach:VDIR:[^:]+:[^:]+:[^:]+:711:"), "covered directory permissions must be persisted")
 assert(not rootMetadata:find("\nmnt:", 1, true), "synthetic mountpoints must not be persisted as directories")
 
+-- file:lines() like Lua's: "l" by default, other formats, several per call
+write("/lines.txt", "one\ntwo\n\nthree")
+do
+    local h = assert(vfs.open("/lines.txt", "r"))
+    local got = {}
+    for line in h:lines() do got[#got + 1] = line end
+    assert(table.concat(got, "|") == "one|two||three", table.concat(got, "|"))
+    h:close()
+
+    h = assert(vfs.open("/lines.txt", "r"))
+    local kept = {}
+    for line in h:lines("L") do kept[#kept + 1] = line end
+    assert(#kept == 4 and kept[1] == "one\n" and kept[3] == "\n" and kept[4] == "three")
+    h:close()
+
+    h = assert(vfs.open("/lines.txt", "r"))
+    local nextPair = h:lines(3, "l")
+    local a, b = nextPair()
+    assert(a == "one" and b == "", tostring(a) .. "/" .. tostring(b))
+    a, b = nextPair()
+    assert(a == "two" and b == "", tostring(a) .. "/" .. tostring(b))
+    h:close()
+    assert(not pcall(nextPair), "a closed file must raise")
+
+    h = assert(vfs.open("/lines.txt", "r"))
+    local rest = h:lines("a")()
+    assert(rest == "one\ntwo\n\nthree")
+    h:close()
+end
+
+-- io.lines(path, ...) closes the file at the end; a missing file raises
+do
+    local ioFile = assert(io.open("src/io.lua", "r"))
+    local ioSource = ioFile:read("a") .. "\nreturn io"
+    ioFile:close()
+    local nexusIo = assert(load(ioSource, "@src/io.lua", "t",
+        setmetatable({ vfs = vfs }, { __index = _G })))()
+    local got = {}
+    for line in nexusIo.lines("/lines.txt") do got[#got + 1] = line end
+    assert(table.concat(got, "|") == "one|two||three")
+    local nextLine = nexusIo.lines("/lines.txt", "L")
+    assert(nextLine() == "one\n")
+    for _ = 1, 3 do assert(nextLine()) end
+    assert(nextLine() == nil and nextLine() == nil, "ends, then stays ended")
+    assert(not pcall(nexusIo.lines, "/no-such-file"))
+end
+
 print("vfs file operation tests passed")
 
 for name, value in pairs(saved) do _G[name] = value end

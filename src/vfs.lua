@@ -1478,6 +1478,27 @@ function vfs.open(path, mode)
         return fs.read(handle, n)
     end
 
+    -- Like Lua's file:lines(...): an iterator returning read(fmt) for each
+    -- format ("l" by default) until the first one gives nil. The file stays
+    -- open; a read error or a closed file raises an error.
+    function file:lines(...)
+        local formats = table.pack(...)
+        if formats.n == 0 then formats = { "l", n = 1 } end
+        return function()
+            if not isOpen() then error("file is already closed", 2) end
+            local values = {}
+            for i = 1, formats.n do
+                local value, err = file:read(formats[i])
+                if value == nil then
+                    if err then error(err, 2) end
+                    return table.unpack(values, 1, i - 1)
+                end
+                values[i] = value
+            end
+            return table.unpack(values, 1, formats.n)
+        end
+    end
+
     function file:readAll()
         if not isOpen() then return nil, "file is closed" end
         if vnode.type == "VREG" then
