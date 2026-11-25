@@ -92,7 +92,7 @@ local function ownSource(given)
         local path = candidates[i]
         if type(path) == "string" then
             local text = readHostFile(path)
-            if text and text:find("local INSTALLER_REV = ", 1, true) then return text end
+            if text and text:find("local INSTALLER_REV%s*=") then return text end
         end
     end
 end
@@ -221,7 +221,7 @@ function stage0.run(args)
     if fs.exists("/init.lua") and not fs.exists(STAGE .. "/init.lua.orig") then
         local current, err = disk.readAll(fs, "/init.lua")
         if not current then return fail(err) end
-        if not current:find("local INSTALLER_REV = ", 1, true) then
+        if not current:find("local INSTALLER_REV%s*=") then
             disk.writeAll(fs, STAGE .. "/init.lua.orig", current)
         end
     end

@@ -43,6 +43,9 @@ do
     local committed = f:read("a"):gsub("\r\n", "\n")
     f:close()
     assert(committed == installer, "dist/nexus-install.lua is out of date: lua tools/mkinstaller.lua dist/nexus-install.lua")
+    -- OpenOS's /tmp is a 64 KB tmpfs, and wget cuts a larger file without
+    -- saying so; leave room for what is already there
+    assert(#installer < 62 * 1024, "the installer is " .. #installer .. " bytes; it must stay below 62 KB")
 end
 
 -- what the rootfs holds, to compare the installed files with
