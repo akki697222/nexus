@@ -11,6 +11,7 @@ filesystem is unpacked onto the disk as ordinary, writable files.
 | `/usr`, `/etc`     | the root filesystem as files                                   |
 | `.meta` files      | modes and owners (`sudo` is set-user-ID), written by the installer |
 | `/home/<user>`     | the account made during the install; root stays locked         |
+| `/etc/group`       | the user is also in the device groups of the installed drivers (`ethernet`, `audio`, `lp`) |
 
 The installer is one file, `nexus-install.lua`, in two stages:
 
@@ -35,9 +36,10 @@ wget -f https://raw.githubusercontent.com/akki697222/nexus/dev-oc/dist/nexus-ins
 /home/nexus-install.lua
 ```
 
-Download it to a disk, not to `/tmp`: `/tmp` is the tmpfs, 64 KB by
-default, and the installer is larger. OpenOS's `wget` still reports success
-for the cut-off file, which then fails with a syntax error.
+Prefer a disk to `/tmp`: `/tmp` is the tmpfs, 64 KB by default. The
+installer is minified to fit it (a test keeps it below 62 KB), but a tmpfs
+that already holds other files may still cut it off, and OpenOS's `wget`
+reports success for the cut-off file, which then fails with a syntax error.
 
 The installer takes the release that `dist/channel.lua` on the default
 branch (`dev-oc`) names (`stable`), so an older copy still installs the
@@ -128,6 +130,9 @@ lua tools/nximg.lua media build/dist build/media
 `dist/nexus-install.lua` is the same installer, kept in the repository for
 the `wget` above; rebuild it with any change to the installer
 (`lua tools/mkinstaller.lua dist/nexus-install.lua`; a test checks it).
+`tools/mkinstaller.lua` minifies it (`tools/minify.lua`: comments and
+indentation go, line breaks stay); `--plain` builds it unminified for
+debugging.
 
 Optional groups are `installer/groups.lua` (the debug tools) and one per
 driver in `drivers.idx`; leaving one out also drops its lines from

@@ -2,7 +2,8 @@
 -- Copyright (c) 2026 akki697222
 -- SPDX-License-Identifier: MIT
 --
---   lua tools/mkinstaller.lua [out]     (from nexus/; default build/install.lua)
+--   lua tools/mkinstaller.lua [--plain] [out]
+--       (from nexus/; default build/install.lua; --plain: not minified)
 --
 -- installer/src/prelude.lua comes first, as it is: the names the parts
 -- share. Every part follows in a do ... end block of its own, as in
@@ -56,8 +57,18 @@ local function shared(name)
     return block
 end
 
--- Returns the installer source.
-function mkinstaller.build()
+-- What the minified file keeps of the comments: what it is and the
+-- copyright notices of what it is made of.
+mkinstaller.HEADER = [[
+-- nexus-install.lua - Nexus installer, minified (tools/mkinstaller.lua)
+-- built from installer/src of https://github.com/akki697222/nexus
+-- Copyright (c) 2026 akki697222 - SPDX-License-Identifier: MIT
+-- SHA-2: Copyright (c) 2018 Phil Leblanc, after Roberto Ierusalimschy - MIT
+]]
+
+-- Returns the installer source, minified (tools/minify.lua) unless
+-- opts.plain: it has to fit OpenOS's 64 KB tmpfs.
+function mkinstaller.build(opts)
     local parts = { strip(read("installer/src/prelude.lua")) }
     for _, part in ipairs(mkinstaller.PARTS) do
         local name = part:match("^bootstrap:(.+)$")
@@ -65,14 +76,19 @@ function mkinstaller.build()
         parts[#parts + 1] = "do -- " .. part .. "\n" .. strip(text) .. "end\n"
     end
     local source = table.concat(parts)
+    if not (opts and opts.plain) then
+        local minify = assert(loadfile("tools/minify.lua"))()
+        source = mkinstaller.HEADER .. minify(source, true)
+    end
     local ok, err = load(source, "=install.lua", "t", {})
     if not ok then error("the installer does not compile: " .. tostring(err), 0) end
     return source
 end
 
 if arg and arg[0] and arg[0]:match("mkinstaller%.lua$") then
-    local out = arg[1] or "build/install.lua"
-    local ok, result = pcall(mkinstaller.build)
+    local plain = arg[1] == "--plain"
+    local out = arg[plain and 2 or 1] or "build/install.lua"
+    local ok, result = pcall(mkinstaller.build, { plain = plain })
     if not ok then
         io.stderr:write("mkinstaller: " .. tostring(result) .. "\n")
         os.exit(1)

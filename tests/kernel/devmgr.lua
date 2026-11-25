@@ -20,7 +20,9 @@ local groups = {
     { name = "chat", gid = 20, members = {} },
     { name = "taken", gid = 100, members = {} },
 }
-local users = { [0] = { name = "root" }, [1000] = { name = "alice" }, [1001] = { name = "bob" } }
+-- the shape src/sec/user.lua gives
+local users = { [0] = { username = "root", uid = 0 }, [1000] = { username = "alice", uid = 1000 },
+    [1001] = { username = "bob", uid = 1001 } }
 
 local devRoot = { children = {} }
 local env
