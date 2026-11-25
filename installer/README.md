@@ -32,22 +32,36 @@ target needs LibDeflate.
 
 ## Installing from OpenOS
 
-1. Copy `installer/nexus-install.lua` to the OpenOS machine.
-2. Serve the `dist` directory over HTTP(S), or put it on a local disk.
-3. Run:
+With an internet card, one command downloads the installer from the GitHub
+release and installs Nexus onto the boot disk, the disk OpenOS is running
+from:
 
 ```sh
-nexus-install http://example.test/nexus <address|label> [reboot]
-nexus-install /mnt/abc/nexus <address|label> [reboot]
+wget -f https://github.com/akki697222/nexus/releases/download/v0.0.6/nexus-install.lua /tmp/nexus-install.lua && /tmp/nexus-install.lua
 ```
 
-Without a target, the command lists filesystems with address, label and free
-space. The installer copies the three files as they are (no decompression,
-memory bounded by one chunk), checks the image header, index checksums and
-size while streaming, writes each file to `<name>.new` and renames it into
-place. An existing `/boot/config.lua` is kept. It labels the target `Nexus`,
-sets it as the boot device, and reboots when `reboot` is given. The running
-boot disk is refused unless `--force` is passed.
+**A clean install erases the whole target disk**, OpenOS and `/home`
+included. The installer prints a warning and asks for `yes` first; the
+computer reboots into Nexus afterwards.
+
+```sh
+nexus-install [<address|label>] [-y] [--upgrade] [--from <url|dir>] [--reboot]
+```
+
+| option | effect |
+| --- | --- |
+| `<address\|label>` | install to another disk instead of the boot disk |
+| `-y` | skip the confirmation |
+| `--upgrade` | replace only `/boot/nexusos` and `/init.lua`; keep the rest of the disk and an existing `/boot/config.lua` |
+| `--from <url\|dir>` | take the distribution from another URL prefix or a local directory (default: the release the installer belongs to) |
+| `--reboot` | reboot after installing to another disk (the boot disk always reboots) |
+| `--help` | list the disks, the boot disk marked `*` |
+
+All three files are downloaded and checked (image header, index checksums
+and size) before anything is erased: into `/.nexus-install` on the target,
+or into memory when the target has less than 320 KB free. A failed download
+leaves the disk as it was. Files are copied as they are, so no data card is
+needed. The target is labelled `Nexus` and set as the boot device.
 
 ## Requirements
 
