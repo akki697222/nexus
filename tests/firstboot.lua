@@ -57,20 +57,20 @@ local function newSystem(passwd)
             local data = sys.files[path]
             if not data then return nil, path .. ": No such file or directory" end
             local pos = 1
+            -- like Nexus file handles: read("*l"/"l"/"*a"/"a"), no :lines()
             return {
                 read = function(_, fmt)
+                    fmt = fmt or "*l"
                     if pos > #data then return nil end
+                    if fmt == "a" or fmt == "*a" then
+                        local rest = data:sub(pos)
+                        pos = #data + 1
+                        return rest
+                    end
+                    assert(fmt == "l" or fmt == "*l", "unsupported read format " .. tostring(fmt))
                     local line, nextPos = data:match("([^\n]*)\n?()", pos)
                     pos = nextPos
                     return line
-                end,
-                lines = function()
-                    return function()
-                        if pos > #data then return nil end
-                        local line, nextPos = data:match("([^\n]*)\n?()", pos)
-                        pos = nextPos
-                        return line
-                    end
                 end,
                 close = function() end,
             }

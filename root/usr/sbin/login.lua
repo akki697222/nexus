@@ -35,14 +35,12 @@ local function anyoneCanLogIn()
     if user.hasPassword("root") then return true end
     local file = io.open("/etc/passwd", "r")
     if not file then return false end
-    for line in file:lines() do
-        local name = line:match("^([^:]+):")
-        if name and user.hasPassword(name) then
-            file:close()
-            return true
-        end
-    end
+    local content = file:read("a") or ""
     file:close()
+    for line in content:gmatch("[^\r\n]+") do
+        local name = line:match("^([^:]+):")
+        if name and user.hasPassword(name) then return true end
+    end
     return false
 end
 

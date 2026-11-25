@@ -59,11 +59,12 @@ local function nextUid()
     local used = {}
     local file = io.open("/etc/passwd", "r")
     if file then
-        for line in file:lines() do
+        local content = file:read("a") or ""
+        file:close()
+        for line in content:gmatch("[^\r\n]+") do
             local uid = tonumber(line:match("^[^:]*:[^:]*:(%d+):"))
             if uid then used[uid] = true end
         end
-        file:close()
     end
     local uid = 100
     while used[uid] do uid = uid + 1 end
