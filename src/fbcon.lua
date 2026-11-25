@@ -151,6 +151,8 @@ end
 
 panic = function(err, reason)
     if config.kernel_panic_bsod then
+        if klog then klog.record("emerg", "kernel", "Kernel panic - " .. err .. ": " .. reason) end
+        if debugcon then debugcon.flush(2) end
         local gpu = component.proxy(component.list("gpu")()) --[[@as oc_component_gpu]]
         local w, h = gpu.getResolution()
         gpu.setForeground(0xFFFFFF)
@@ -181,6 +183,7 @@ panic = function(err, reason)
         for _ = 0, 2 do
             computer.beep()
         end
+        if debugcon then debugcon.flush(2) end
         -- resume kthreads and processes once to force update screen
         runProcessQueue({})
         resumeKernelThreads()

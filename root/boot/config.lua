@@ -28,6 +28,16 @@ local config = {
     tty_debug = false;
     -- every 2s of activity, log kernel loop statistics to dmesg (kdebug.lua)
     loop_stats = false;
+    -- Debug consoles, output only: every kernel log line (printk, system.log,
+    -- panics) also goes to the Ocelot card's log (ocelot), a serial port of
+    -- tools/headless (serial) and a TCP server through an internet card
+    -- (tcp = "host:port", tools/debugserver). Lines below level are left out.
+    debug_console = {
+        ocelot = true;
+        serial = true;
+        tcp = nil;
+        level = "debug";
+    };
     -- Filesystem
     filesystem_read_bytes = math.huge;
 }

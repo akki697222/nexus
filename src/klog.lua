@@ -37,6 +37,8 @@ function klog.record(level, tag, msg, pid, uid)
     }
     ring[nextSeq] = entry
     nextSeq = nextSeq + 1
+    -- debug consoles (debugcon.lua) get every line as it is logged
+    if debugcon then debugcon.emit(entry) end
     bytes = bytes + #msg + #tag + 32
     while first < nextSeq - 1 and (nextSeq - first > klog.MAX_ENTRIES or bytes > klog.MAX_BYTES) do
         local old = ring[first]

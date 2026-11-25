@@ -77,6 +77,8 @@ local function main()
     for addr, dev in pairs(device.list()) do
         printk("device [" .. addr .. "] " .. dev.product .. " (" .. dev.desc .. ")")
     end
+    -- debug consoles (Ocelot card, serial, tcp) get the lines so far now
+    debugcon.probe()
 
     -- Mount root
     do
@@ -311,10 +313,12 @@ local function main()
         if ev.n > 0 then
             device.handleEvent(ev[1], ev[2])
             devmgr.handleEvent(ev[1], ev[2], ev[3])
+            debugcon.handleEvent(ev[1], ev[2], ev[3])
             event.dispatch(ev)
         else
             event.markIdle(computer.uptime())
         end
+        debugcon.tick()
 
         if stats then stats.pass(ev) end
 

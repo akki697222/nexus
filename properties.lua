@@ -11,6 +11,7 @@ properties.includes = {
     "sha2.lua",
     "util.lua",
     "klog.lua",
+    "debugcon.lua",
     "fbcon.lua",
     "permission.lua",
     "user.lua",
