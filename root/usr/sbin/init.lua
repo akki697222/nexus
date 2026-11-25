@@ -141,7 +141,11 @@ if fs.exists("/etc/profile.lua") then
 end
 
 if not os.getenv("HOSTNAME") then
-    os.setenv("HOSTNAME", "nexus")
+    -- /etc/hostname is written by firstboot; "nexus" until then
+    local file = io.open("/etc/hostname", "r")
+    local name = file and file:read("*l")
+    if file then file:close() end
+    os.setenv("HOSTNAME", (name and name ~= "") and name or "nexus")
 end
 
 for _, runlevel in ipairs({ "sysinit", "boot", "default" }) do

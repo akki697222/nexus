@@ -206,6 +206,56 @@ function user.checkPasswordCorrect(username, passwd)
     return false
 end
 
+-- Whether username has a usable password; a locked entry ("*", "!...") or an
+-- empty one has none. Root only, like reading /etc/shadow.
+---@return boolean
+function user.hasPassword(username)
+    if not user.checkRoot() then return false end
+    local shadow = user_getShadow(username)
+    if not shadow then return false end
+    local first = shadow.password:sub(1, 1)
+    return first ~= "" and first ~= "*" and first ~= "!"
+end
+
+-- Sets the password of an existing user (root only, like passwd(1) run by
+-- root). Rewrites that user's /etc/shadow entry, or adds one if missing.
+---@return true|nil, nil|string
+function user.setPassword(username, password)
+    if not user.checkRoot() then return nil, "Permission denied" end
+    if type(username) ~= "string" or not user.getUser(username) then
+        return nil, "user not found"
+    end
+    if type(password) ~= "string" or password == "" then
+        return nil, "empty password"
+    end
+
+    local handle, err = vfs.open("/etc/shadow", "r")
+    if not handle then return nil, err end
+    local content = handle:readAll()
+    handle:close()
+
+    local hash = toHex(sha512(password .. "salt"))
+    local now = tostring(math.floor(os.time()))
+    local lines, found = {}, false
+    for line in content:gmatch("[^\r\n]+") do
+        local name, rest = line:match("^([^:]+):[^:]*:[^:]*(.*)$")
+        if name == username then
+            line = name .. ":" .. hash .. ":" .. now .. rest
+            found = true
+        end
+        lines[#lines + 1] = line
+    end
+    if not found then
+        lines[#lines + 1] = username .. ":" .. hash .. ":" .. now .. ":0:99999:7:::"
+    end
+
+    local out, openErr = vfs.open("/etc/shadow", "w")
+    if not out then return nil, openErr end
+    out:write(table.concat(lines, "\n") .. "\n")
+    out:close()
+    return true
+end
+
 ---@return user_passwd?
 function user.getCurrent()
     local proc = process.getCurrent()
