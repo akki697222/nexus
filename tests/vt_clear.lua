@@ -64,7 +64,7 @@ local function file(mode)
 end
 
 local devfsEnv = setmetatable({ vfsk = { createVNode = function() return {} end } }, { __index = _G })
-assert(loadfile("src/devfs.lua", "t", devfsEnv))()
+assert(loadfile("src/fs/devfs.lua", "t", devfsEnv))()
 local vt
 local apis = {
     devfs = devfsEnv.devfs,

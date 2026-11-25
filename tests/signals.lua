@@ -1,9 +1,6 @@
 -- Unix signals: dispositions, default actions, process groups.
 -- Run from the Nexus directory: lua tests/signals.lua
-local source_file = "src/process.lua"
-local file = assert(io.open(source_file, "r"))
-local process_source = file:read("*a")
-file:close()
+local process_source = dofile("tests/lib/kernel.lua").source("process")
 
 local function fresh()
     local programs = {}

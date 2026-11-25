@@ -2,9 +2,7 @@
 -- Run from nexus/: lua tests/imgfs.lua
 -- (VFS harness shared with tests/vfs_fileops.lua)
 local hostLoadfile = loadfile
-local f = assert(io.open("src/vfs.lua", "r"))
-local source = f:read("*a")
-f:close()
+local source = dofile("tests/lib/kernel.lua").source("vfs")
 
 local saved = {}
 for _, name in ipairs({ "vfs", "vfsk", "process", "config", "fnv1a_hash", "devfs",
@@ -30,10 +28,10 @@ config = { filesystem_read_bytes = 128 }
 fnv1a_hash = hash
 unicode = { sub = string.sub }
 getRealTime = os.time
-local pf = assert(io.open("src/permission.lua", "r"))
+local pf = assert(io.open("src/sec/permission.lua", "r"))
 local permissionSource = pf:read("*a")
 pf:close()
-assert(load(permissionSource, "src/permission.lua"))()
+assert(load(permissionSource, "src/sec/permission.lua"))()
 devfs = { close = function() end }
 
 local function fakeFs(address)
@@ -156,7 +154,7 @@ local function fakeFs(address)
     return fs
 end
 
-assert(load(source, "src/vfs.lua"))()
+assert(load(source, "=vfs"))()
 local fsA = fakeFs("disk-a")
 assert(vfs.mount(fsA, "/"))
 
@@ -213,10 +211,10 @@ component = {
     end,
 }
 
-local f = assert(io.open("src/imgfs.lua", "r"))
+local f = assert(io.open("src/fs/imgfs.lua", "r"))
 local imgfsSource = f:read("*a")
 f:close()
-assert(load(imgfsSource, "src/imgfs.lua"))()
+assert(load(imgfsSource, "src/fs/imgfs.lua"))()
 
 -- 1. Proxy behaviour.
 local usr = assert(imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr))
@@ -297,7 +295,7 @@ assert(not none and noneErr:find("data card", 1, true))
 -- with the loader's Lua inflater, no data card is needed
 local softCalls = 0
 NEXUS_INFLATE = function(z) softCalls = softCalls + 1; return LD:DecompressZlib(z) end
-assert(load(imgfsSource, "src/imgfs.lua"))()
+assert(load(imgfsSource, "src/fs/imgfs.lua"))()
 assert(NEXUS_INFLATE == nil, "imgfs takes the inflater out of the global table")
 local softUsr = assert(imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr))
 local sh = assert(softUsr.open("/lib/big.txt", "rb"))
@@ -310,7 +308,7 @@ end
 softUsr.close(sh)
 assert(table.concat(got) == big and softCalls > 0)
 NEXUS_INFLATE = function() error("bad data") end
-assert(load(imgfsSource, "src/imgfs.lua"))()
+assert(load(imgfsSource, "src/fs/imgfs.lua"))()
 local badUsr, badErr = imgfs.open("disk-a", "/boot/nexusos", imgfs.SECTION.usr)
 assert(not badUsr and tostring(badErr):find("imgfs: inflate failed", 1, true), tostring(badErr))
 

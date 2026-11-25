@@ -1,8 +1,6 @@
 -- Standalone regression tests for spawn/wait identity and stdio inheritance.
 -- Run with: lua tests/process_spawn.lua
-local file = assert(io.open("src/process.lua", "r"))
-local source = file:read("*a")
-file:close()
+local source = dofile("tests/lib/kernel.lua").source("process")
 
 local programs, inherited = {}, nil
 local old_loadfile, old = loadfile, {}

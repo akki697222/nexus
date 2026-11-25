@@ -8,7 +8,7 @@ end
 
 local sudo_source = read("root/usr/bin/sudo.lua")
 local argparse_source = read("root/usr/lib/libargparse.lua")
-local main_source = read("src/main.lua")
+local main_source = read("src/kernel/main.lua")
 local unpack_args = table.unpack or unpack
 
 assert(main_source:find('vfs.chown("/usr/bin/sudo.lua", 0, 0)', 1, true)

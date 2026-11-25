@@ -10,8 +10,8 @@ getRealTime = function() return realTime end
 local current = nil -- process.getCurrent()
 process = { current = -1, getCurrent = function() return current end }
 config = {}
-assert(hostLoadfile("src/klog.lua"))()
-local sysSource = read("src/system.lua")
+assert(hostLoadfile("src/kernel/klog.lua"))()
+local sysSource = read("src/kernel/system.lua")
 assert(load(sysSource, "=system.lua"))()
 
 klog.record("info", "kernel", "boot")
@@ -96,7 +96,7 @@ do
         os = setmetatable({ getenv = function(k) return k == "HOSTNAME" and "box" or nil end }, { __index = os }),
     })
     -- a fresh ring
-    assert(load(read("src/klog.lua")))()
+    assert(load(read("src/kernel/klog.lua")))()
     klog.record("info", "kernel", "VFS: mounted")
     current = { pid = 7, uid = 0, path = "/usr/sbin/synapsed.lua" }
     system.log("mounted abc on /mnt/x")
@@ -128,7 +128,7 @@ end
 
 -- dmesg / logger -----------------------------------------------------------------
 do
-    assert(load(read("src/klog.lua")))()
+    assert(load(read("src/kernel/klog.lua")))()
     uptime = 4.4
     klog.record("info", "kernel", "Nexus version test")
     current = { pid = 3, uid = 0, path = "/usr/sbin/syslogd.lua" }
@@ -164,7 +164,7 @@ end
 
 -- synapsed ------------------------------------------------------------------------
 do
-    assert(load(read("src/klog.lua")))()
+    assert(load(read("src/kernel/klog.lua")))()
     local fs = newFs()
     local labels = { aaa111 = "OpenOS", bbb222 = nil, ccc333 = "backup", ddd444 = "OpenOS", eee555 = "junk",
                      boot00 = "Nexus", tmp000 = "tmpfs" }

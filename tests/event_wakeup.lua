@@ -7,7 +7,7 @@ function process.getCurrent()
     if process.current == -1 then return nil end
     return { pid = process.current }
 end
-assert(loadfile("src/event.lua"))()
+assert(loadfile("src/proc/event.lua"))()
 
 -- A blocked pull, run the way the scheduler does: as `pid`, resumed with
 -- the process start arguments.

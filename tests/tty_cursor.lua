@@ -48,7 +48,7 @@ local vt
 local devfsEnv = setmetatable({
     vfsk = { createVNode = function() return {} end },
 }, { __index = _G })
-assert(loadfile("src/devfs.lua", "t", devfsEnv))()
+assert(loadfile("src/fs/devfs.lua", "t", devfsEnv))()
 local devfs = devfsEnv.devfs
 local apis = {
     devfs = devfs,

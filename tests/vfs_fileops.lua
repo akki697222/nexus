@@ -1,7 +1,5 @@
 -- VFS file mutation regressions. Run from nexus/: lua tests/vfs_fileops.lua
-local f = assert(io.open("src/vfs.lua", "r"))
-local source = f:read("*a")
-f:close()
+local source = dofile("tests/lib/kernel.lua").source("vfs")
 
 local saved = {}
 for _, name in ipairs({ "vfs", "vfsk", "process", "config", "fnv1a_hash", "devfs",
@@ -27,10 +25,10 @@ config = { filesystem_read_bytes = 128 }
 fnv1a_hash = hash
 unicode = { sub = string.sub }
 getRealTime = os.time
-local pf = assert(io.open("src/permission.lua", "r"))
+local pf = assert(io.open("src/sec/permission.lua", "r"))
 local permissionSource = pf:read("*a")
 pf:close()
-assert(load(permissionSource, "src/permission.lua"))()
+assert(load(permissionSource, "src/sec/permission.lua"))()
 devfs = { close = function() end }
 
 local function fakeFs(address)
@@ -153,7 +151,7 @@ local function fakeFs(address)
     return fs
 end
 
-assert(load(source, "src/vfs.lua"))()
+assert(load(source, "=vfs"))()
 local fsA, fsB = fakeFs("disk-a"), fakeFs("disk-b")
 fsA.totalCapacity, fsA.usedCapacity = 8192, 2048
 fsB.totalCapacity, fsB.usedCapacity = math.huge, 1024
@@ -376,10 +374,10 @@ end
 
 -- io.lines(path, ...) closes the file at the end; a missing file raises
 do
-    local ioFile = assert(io.open("src/io.lua", "r"))
+    local ioFile = assert(io.open("src/api/io.lua", "r"))
     local ioSource = ioFile:read("a") .. "\nreturn io"
     ioFile:close()
-    local nexusIo = assert(load(ioSource, "@src/io.lua", "t",
+    local nexusIo = assert(load(ioSource, "@src/api/io.lua", "t",
         setmetatable({ vfs = vfs }, { __index = _G })))()
     local got = {}
     for line in nexusIo.lines("/lines.txt") do got[#got + 1] = line end

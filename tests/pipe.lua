@@ -1,8 +1,5 @@
 -- Focused VFS anonymous-pipe tests. Run from nexus/: lua tests/pipe.lua
-local file = assert(io.open("src/vfs.lua", "r"))
-local source = file:read("*a")
-file:close()
--- Expose the kernel-only descriptor helpers to this isolated test chunk.
+local source = dofile("tests/lib/kernel.lua").source("vfs")
 
 local saved = {}
 for _, name in ipairs({ "vfs", "vfsk", "process", "config", "fnv1a_hash", "devfs" }) do
@@ -18,7 +15,7 @@ process = {
 config = { filesystem_read_bytes = 64 }
 fnv1a_hash = function(value) return #value end
 devfs = { close = function() end }
-assert(load(source, "src/vfs.lua"))()
+assert(load(source, "=vfs"))()
 
 local function reset()
     current.fd = {}

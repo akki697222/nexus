@@ -12,8 +12,8 @@
 local component, computer = component, computer
 
 -- Subsystems one source defines and others use.
-local util, permission, fbcon, vfs, vfsk, vhandles, descriptor, devfs, procfs,
-    imgfs, package, process, event, module, system, device, io
+local util, permission, fbcon, vfs, vfsk, vfsi, vhandles, descriptor, devfs,
+    procfs, imgfs, package, process, proci, event, module, system, device, io
 
 -- Set by main.lua once the scheduler runs; panic() calls them.
 local runProcessQueue, resumeKernelThreads = function() end, function() end

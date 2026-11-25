@@ -1,9 +1,7 @@
 -- Standalone regression tests for exec credential transitions and argv isolation.
 -- Run from the nexus repository root with: lua tests/sudo_exec.lua
-local file = assert(io.open("src/process.lua", "r"))
-local process_source = file:read("*a")
-file:close()
-file = assert(io.open("src/permission.lua", "r"))
+local process_source = dofile("tests/lib/kernel.lua").source("process")
+local file = assert(io.open("src/sec/permission.lua", "r"))
 local permission_source = file:read("*a")
 file:close()
 

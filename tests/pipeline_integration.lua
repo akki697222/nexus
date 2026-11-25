@@ -6,13 +6,15 @@ local function readSource(path)
     return text
 end
 
-local main = readSource("src/main.lua")
+local main = readSource("src/kernel/main.lua")
 local scheduler = assert(main:match("    (runProcessQueue = function.-)\n    resumeKernelThreads"))
 local setup = [[
 local process, io
 local event
 ]]
 local harness = [[
+-- vfs internals the stand-in vfs.open below needs
+local allocFd, fdTable = vfsi.allocFd, vfsi.fdTable
 local input, output, errors = "", {}, {}
 local commands = {}
 local files = {
@@ -208,8 +210,8 @@ local env = setmetatable({
     catSource = readSource("root/usr/ubin/cat.lua"),
 }, { __index = _G })
 local source = table.concat({
-    setup, readSource("src/vfs.lua"), readSource("src/process.lua"),
-    readSource("src/io.lua"), scheduler, harness,
+    setup, dofile("tests/lib/kernel.lua").source("vfs"), dofile("tests/lib/kernel.lua").source("process"),
+    readSource("src/api/io.lua"), scheduler, harness,
 }, "\n")
 assert(load(source, "@pipeline_integration", "t", env))()
 print("pipeline integration passed")

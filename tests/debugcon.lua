@@ -1,4 +1,4 @@
--- Tests for src/debugcon.lua (kernel debug consoles) with src/klog.lua.
+-- Tests for src/kernel/debugcon.lua (kernel debug consoles) with src/kernel/klog.lua.
 -- Run from nexus/: lua tests/debugcon.lua
 local function read(path)
     local f = assert(io.open(path, "r"))
@@ -6,7 +6,7 @@ local function read(path)
     f:close()
     return v
 end
-local source = read("src/klog.lua") .. "\n" .. read("src/debugcon.lua")
+local source = read("src/kernel/klog.lua") .. "\n" .. read("src/kernel/debugcon.lua")
 
 local function system(opts)
     opts = opts or {}

@@ -1,6 +1,6 @@
 -- Standalone kernel shutdown API regression tests. Run with:
 --   lua tests/system_shutdown.lua
-local source_file = assert(io.open("src/system.lua", "r"))
+local source_file = assert(io.open("src/kernel/system.lua", "r"))
 local system_source = source_file:read("*a")
 source_file:close()
 

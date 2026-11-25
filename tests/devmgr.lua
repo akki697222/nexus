@@ -91,14 +91,14 @@ env = setmetatable({
 }, { __index = _G })
 
 local source = table.concat({
-    readSource("src/permission.lua"),
+    readSource("src/sec/permission.lua"),
     "\nlocal devfs = {}\n",
     -- devfs.lua declares a global; keep it inside the chunk
-    (readSource("src/devfs.lua"):gsub("^devfs = {}", "")),
+    (readSource("src/fs/devfs.lua"):gsub("^devfs = {}", "")),
     -- devfs.lua declares `local module`; module.lua fills it in the kernel
     "\nmodule = _ENV.module\n",
     "\nlocal device = {}\n",
-    readSource("src/devmgr.lua"),
+    readSource("src/dev/devmgr.lua"),
     "\nreturn devmgr, device, devfs",
 }, "\n")
 local devmgr, device, devfs = assert(load(source, "@devmgr", "t", env))()

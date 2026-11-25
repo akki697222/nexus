@@ -1,6 +1,6 @@
--- Tests for user.hasPassword and user.setPassword (src/user.lua).
+-- Tests for user.hasPassword and user.setPassword (src/sec/user.lua).
 -- Run from the Nexus directory: lua tests/user_password.lua
-local sourceFile = assert(io.open("src/user.lua", "r"))
+local sourceFile = assert(io.open("src/sec/user.lua", "r"))
 local source = sourceFile:read("*a")
 sourceFile:close()
 
@@ -43,7 +43,7 @@ local env = setmetatable({
     },
 }, { __index = _G })
 
-assert(load(source, "@src/user.lua", "t", env))()
+assert(load(source, "@src/sec/user.lua", "t", env))()
 local user = env.user
 user.updateUsers()
 

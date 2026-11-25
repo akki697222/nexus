@@ -26,8 +26,8 @@ local env = setmetatable({
 }, { __index = _G })
 
 local source = table.concat({
-    readSource("src/devfs.lua"),
-    readSource("src/device.lua"),
+    readSource("src/fs/devfs.lua"),
+    readSource("src/dev/device.lua"),
     "return device",
 }, "\n")
 local device = assert(load(source, "@device_hotplug", "t", env))()

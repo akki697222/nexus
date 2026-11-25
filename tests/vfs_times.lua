@@ -1,9 +1,7 @@
 -- File timestamps: whole Unix seconds, real time.
 -- Run from nexus/: lua tests/vfs_times.lua
 -- (VFS harness shared with tests/vfs_fileops.lua)
-local f = assert(io.open("src/vfs.lua", "r"))
-local source = f:read("*a")
-f:close()
+local source = dofile("tests/lib/kernel.lua").source("vfs")
 
 local saved = {}
 for _, name in ipairs({ "vfs", "vfsk", "process", "config", "fnv1a_hash", "devfs",
@@ -29,10 +27,10 @@ config = { filesystem_read_bytes = 128 }
 fnv1a_hash = hash
 unicode = { sub = string.sub }
 getRealTime = os.time
-local pf = assert(io.open("src/permission.lua", "r"))
+local pf = assert(io.open("src/sec/permission.lua", "r"))
 local permissionSource = pf:read("*a")
 pf:close()
-assert(load(permissionSource, "src/permission.lua"))()
+assert(load(permissionSource, "src/sec/permission.lua"))()
 devfs = { close = function() end }
 
 local function fakeFs(address)
@@ -155,7 +153,7 @@ local function fakeFs(address)
     return fs
 end
 
-assert(load(source, "src/vfs.lua"))()
+assert(load(source, "=vfs"))()
 local now = 1800000000
 getRealTime = function() return now end
 
