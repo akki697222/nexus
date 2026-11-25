@@ -11,6 +11,7 @@ filesystem is unpacked onto the disk as ordinary, writable files.
 | `/usr`, `/etc`     | the root filesystem as files                                   |
 | `.meta` files      | modes and owners (`sudo` is set-user-ID), written by the installer |
 | `/home/<user>`     | the account made during the install; root stays locked         |
+| `/etc/group`       | the user is also in the device groups of the installed drivers (`ethernet`, `audio`, `lp`) |
 
 The installer is one file, `nexus-install.lua`, in two stages:
 

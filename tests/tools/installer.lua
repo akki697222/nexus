@@ -127,7 +127,16 @@ local function checkInstalled(disk, user, password, left)
     assert(shadow:match("^root:%*:"), "root stays locked")
     assert(shadow:find("\n" .. user .. ":" .. shadowHash(password) .. ":%d+:0:99999:7:::\n"), shadow)
     assert((attrs(disk, "/etc/shadow")) == "400")
-    assert(disk.get("/etc/group") == "root:0:\n" .. user .. ":1000:" .. user .. "\n")
+    local groupFile = "root:0:\n" .. user .. ":1000:" .. user .. "\n"
+    local gid, seenGroup = 100, {}
+    for _, g in ipairs(manifest.groups) do
+        if not left[g.id] and g.devgroup and not seenGroup[g.devgroup] then
+            seenGroup[g.devgroup] = true
+            groupFile = groupFile .. g.devgroup .. ":" .. gid .. ":" .. user .. "\n"
+            gid = gid + 1
+        end
+    end
+    assert(disk.get("/etc/group") == groupFile, disk.get("/etc/group"))
     local mode, uid, gid = attrs(disk, "/home/" .. user)
     assert(mode == "755" and uid == 1000 and gid == 1000)
     local _, puid = attrs(disk, "/home/" .. user .. "/.profile.lua")

@@ -1110,7 +1110,16 @@ put("/etc/passwd","root:x:0:0:root:/root:/bin/sh.lua\n"
 ..string.format("%s:x:%d:%d::%s:/bin/sh.lua\n",name,USER_UID,USER_UID,home),"644")
 put("/etc/shadow","root:*:0:0:99999:7:::\n"
 ..string.format("%s:%s:%d:0:99999:7:::\n",name,plan.user.hash,now),"400")
-put("/etc/group",string.format("root:0:\n%s:%d:%s\n",name,USER_UID,name),"644")
+local groupLines,gid,seen={"root:0:",string.format("%s:%d:%s",name,USER_UID,name)},100,{}
+for _,g in ipairs(m.groups)do
+local dg=g.devgroup
+if plan.groups[g.id]and type(dg)=="string"and dg:match("^[%w_%-]+$")and not seen[dg]then
+seen[dg]=true
+groupLines[#groupLines+1]=string.format("%s:%d:%s",dg,gid,name)
+gid=gid+1
+end
+end
+put("/etc/group",table.concat(groupLines,"\n").."\n","644")
 for _,dir in ipairs({{"/root","700",0},{"/home","755",0},{home,"755",USER_UID}})do
 disk.mkdir(fs,dir[1])
 attrs.add(dir[1],true,octal(dir[2]),dir[3],dir[3])

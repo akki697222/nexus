@@ -536,7 +536,7 @@ local function manifest_groups(usr_dir, etc_dir)
         local path = d.path:gsub("^/", "")
         if present[path] then
             groups[#groups + 1] = { id = "driver:" .. d.name, name = d.desc or d.name, default = true,
-                paths = { path }, drivers = { d.path } }
+                paths = { path }, drivers = { d.path }, devgroup = d.group }
         end
     end
     return groups

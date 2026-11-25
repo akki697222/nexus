@@ -505,10 +505,11 @@ local function inGroup(proc, gid)
     if (proc.egid or proc.gid) == gid then return true end
     local g = group.getGroupByGID(gid)
     if not g then return false end
+    -- user entries are { username = ..., uid = ... } (src/sec/user.lua)
     local u = user.getUserByUID(proc.euid or proc.uid)
     if not u then return false end
     for _, m in ipairs(g.members or {}) do
-        if m == u.name then return true end
+        if m == u.username then return true end
     end
     return false
 end
