@@ -1,0 +1,341 @@
+---@class user
+user = {}
+
+---@class user_shadow
+---@field username string
+---@field password string
+---@field last_change number|nil
+---@field min_days number|nil
+---@field max_days number|nil
+---@field warn_days number|nil
+---@field inactive_days number|nil
+---@field expire_date number|nil
+---@field reserved string|nil
+
+---@class user_passwd
+---@field username string
+---@field password string
+---@field uid number
+---@field gid number
+---@field gecos string
+---@field home string
+---@field shell string
+
+local users = {}
+
+local function user_getShadows()
+    local handle, err = vfs.open("/etc/shadow", "r")
+    if not handle then return nil, err end
+
+    local content = handle:readAll()
+    handle:close()
+
+    local shadows = {}
+    for line in content:gmatch("[^\r\n]+") do
+        local u, p, last, min, max, warn, inactive, expire, reserved =
+            line:match("^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):?(.*)")
+
+        if u then
+            table.insert(shadows, {
+                username = u,
+                password = p,
+                last_change = tonumber(last) or nil,
+                min_days = tonumber(min) or nil,
+                max_days = tonumber(max) or nil,
+                warn_days = tonumber(warn) or nil,
+                inactive_days = tonumber(inactive) or nil,
+                expire_date = tonumber(expire) or nil,
+                reserved = reserved ~= "" and reserved or nil
+            })
+        end
+    end
+
+    return shadows
+end
+
+local function user_getShadow(username)
+    local shadows, err = user_getShadows()
+    if not shadows then return nil, err end
+
+    for _, entry in ipairs(shadows) do
+        if entry.username == username then
+            return entry
+        end
+    end
+
+    return nil, "user not found"
+end
+
+function user.checkRoot()
+    local proc = process.getCurrent()
+    return proc ~= nil and proc.euid == 0
+end
+
+function user.updateUsers()
+    local file = vfs.open("/etc/passwd", "r")
+    if not file then return nil, "cannot open /etc/passwd" end
+
+    users = {}
+
+    local content = file:readAll()
+    file:close()
+    for line in content:gmatch("[^\r\n]+") do
+        local username, password, uid, gid, gecos, home, shell = line:match("^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)")
+
+        if username then
+            table.insert(users, {
+                username = username,
+                password = password,
+                uid = tonumber(uid),
+                gid = tonumber(gid),
+                gecos = gecos,
+                home = home,
+                shell = shell
+            })
+        end
+    end
+end
+
+function user.getUser(username)
+    for _, entry in ipairs(users) do
+        if entry.username == username then
+            return util.copyTable(entry)
+        end
+    end
+
+    return nil, "user not found"
+end
+
+function user.create(username, password, uid, gid, gecos, shell)
+    uid = uid or 100
+    gid = gid or uid
+
+    if not group.getGroupByGID(gid) then
+        group.create(username, gid, { username })
+    end
+
+    gecos = gecos or ""
+    shell = shell or "/bin/sh.lua"
+
+    local passwd_line = table.concat({
+        username,
+        "x",
+        tostring(uid),
+        tostring(gid),
+        gecos,
+        "/home/" .. username,
+        shell,
+    }, ":")
+
+    local hash = toHex(sha512(password .. "salt"))
+    -- Using base.getRealTime if available, else os.time
+    local last_change = math.floor(os.time())
+    local min_days = 0
+    local max_days = 99999
+    local warn_days = 7
+    local inactive_days = ""
+    local expire_date = ""
+    local reserved = ""
+
+    local shadow_line = table.concat({
+        username,
+        hash,
+        tostring(last_change),
+        tostring(min_days),
+        tostring(max_days),
+        tostring(warn_days),
+        inactive_days,
+        expire_date,
+        reserved,
+    }, ":")
+
+
+    local shadow_file, e = vfs.open("/etc/shadow", "a")
+    if not shadow_file then return nil, "cannot open /etc/shadow: " .. e end
+    shadow_file:write(shadow_line .. "\n")
+    shadow_file:close()
+
+    local passwd_file, e = vfs.open("/etc/passwd", "a")
+    if not passwd_file then return nil, "cannot open /etc/passwd: " .. e end
+    passwd_file:write(passwd_line .. "\n")
+    passwd_file:close()
+
+    user.updateUsers()
+    if not vfs.exists("/home") then
+        vfs.makeDirectory("/home")
+    end
+
+    local home = vfs.concat("/home", username)
+    vfs.makeDirectory(home)
+    vfs.chown(home, uid, gid)
+    do
+        local prof = vfs.concat(home, ".profile.lua")
+        local f, e = vfs.open(prof, "w")
+        if f then
+            f:write("local colors = require(\"colors\")\n")
+            f:write("local process = require(\"process\")\n")
+            f:write("os.setenv(\"HISTSIZE\", \"10\")\n")
+            f:write("os.setenv(\"HOME\", \"" .. home .. "\")\n")
+            f:write("os.setenv(\"PWD\", \"" .. home .. "\")")
+            f:write("os.setenv(\"PS1\", colors.green .. \"$USERNAME@$HOSTNAME\" .. colors.reset .. \":\" .. colors.bright_blue .. \"$PWD\" .. colors.reset .. \"$ \")\n")
+            f:write("process.cwd(os.getenv(\"HOME\"))")
+            f:close()
+        else
+            printk("user: create: cannot open '" .. prof .. "': " .. e, "err")
+        end
+        vfs.chown(prof, uid, gid)
+    end
+end
+
+function user.getUserByUID(uid)
+    for _, entry in ipairs(users) do
+        if entry.uid == uid then
+            return util.copyTable(entry)
+        end
+    end
+
+    return nil, "user not found"
+end
+
+function user.checkPasswordCorrect(username, passwd)
+    local passwd_hash = toHex(sha512(passwd .. "salt"))
+    local shadow = user_getShadow(username)
+    if shadow and shadow.password == passwd_hash then
+        return true
+    end
+    return false
+end
+
+-- Whether username has a usable password; a locked entry ("*", "!...") or an
+-- empty one has none. Root only, like reading /etc/shadow.
+---@return boolean
+function user.hasPassword(username)
+    if not user.checkRoot() then return false end
+    local shadow = user_getShadow(username)
+    if not shadow then return false end
+    local first = shadow.password:sub(1, 1)
+    return first ~= "" and first ~= "*" and first ~= "!"
+end
+
+-- Sets the password of an existing user (root only, like passwd(1) run by
+-- root). Rewrites that user's /etc/shadow entry, or adds one if missing.
+---@return true|nil, nil|string
+function user.setPassword(username, password)
+    if not user.checkRoot() then return nil, "Permission denied" end
+    if type(username) ~= "string" or not user.getUser(username) then
+        return nil, "user not found"
+    end
+    if type(password) ~= "string" or password == "" then
+        return nil, "empty password"
+    end
+
+    local handle, err = vfs.open("/etc/shadow", "r")
+    if not handle then return nil, err end
+    local content = handle:readAll()
+    handle:close()
+
+    local hash = toHex(sha512(password .. "salt"))
+    local now = tostring(math.floor(os.time()))
+    local lines, found = {}, false
+    for line in content:gmatch("[^\r\n]+") do
+        local name, rest = line:match("^([^:]+):[^:]*:[^:]*(.*)$")
+        if name == username then
+            line = name .. ":" .. hash .. ":" .. now .. rest
+            found = true
+        end
+        lines[#lines + 1] = line
+    end
+    if not found then
+        lines[#lines + 1] = username .. ":" .. hash .. ":" .. now .. ":0:99999:7:::"
+    end
+
+    local out, openErr = vfs.open("/etc/shadow", "w")
+    if not out then return nil, openErr end
+    out:write(table.concat(lines, "\n") .. "\n")
+    out:close()
+    return true
+end
+
+---@return user_passwd?
+function user.getCurrent()
+    local proc = process.getCurrent()
+    if not proc then return nil end
+    return user.getUserByUID(proc.uid)
+end
+
+---@return user_passwd|nil, nil|string
+function user.switchuser(username, password)
+    if user.checkPasswordCorrect(username, password) then
+        ---@type user_passwd
+        local usr = user.getUser(username) --[[@as user_passwd]]
+        if not usr then return nil, "User not found" end
+
+        process.setEnviron("HOME", usr.home)
+        process.setEnviron("USER", usr.username)
+        process.setEnviron("SHELL", usr.shell)
+
+        return usr
+    else
+        return nil, "Authentication failed"
+    end
+end
+
+---@return user_passwd|nil, nil|string
+function user.switchprocuser(username, password, pid)
+    if user.checkPasswordCorrect(username, password) then
+        local usr = user.getUser(username)
+        if not usr then return nil, "User not found" end
+
+        local proc = process.get(pid)
+        if not proc then return nil, "Process not found" end
+
+        proc.uid  = usr.uid
+        proc.euid = usr.uid
+        proc.suid = usr.uid
+        proc.gid  = usr.gid
+        proc.egid = usr.gid
+        proc.sgid = usr.gid
+
+        proc.environ["HOME"]     = usr.home
+        proc.environ["USER"]     = usr.username
+        proc.environ["USERNAME"] = usr.username
+        proc.environ["SHELL"]    = usr.shell
+        proc.environ["PWD"]      = usr.home
+
+        return usr
+    else
+        return nil, "Authentication failed"
+    end
+end
+
+function user.init()
+    if not vfs.exists("/etc/passwd") then
+        local f, e = vfs.open("/etc/passwd", "w")
+        if not f then
+            panic("not syncing", "Unable to open /etc/passwd: " .. e)
+        end
+        f:write("root:x:0:0:root:/root:/bin/sh.lua\n")
+        f:close()
+    end
+
+    if not vfs.exists("/etc/shadow") then
+        local f, e = vfs.open("/etc/shadow", "w")
+        if not f then
+            panic("not syncing", "Unable to open /etc/shadow: " .. e)
+        end
+        f:write("root:*:0:0:99999:7:::\n")
+        f:close()
+    end
+
+    vfs.chmod("/etc/shadow", 400)
+    user.updateUsers()
+
+    if not vfs.exists("/root") then
+        local created, err = vfs.makeDirectory("/root")
+        if created then
+            vfs.chmod("/root", 0700)
+        else
+            printk("user: init: cannot create '/root': " .. tostring(err or "unknown error"), "err")
+        end
+    end
+end

@@ -122,15 +122,27 @@ local function scrollToCursor()
     if cx >= left + width then left = cx - width + 1 end
 end
 
+-- What each screen row shows now; only rows that differ are rewritten, so
+-- moving the cursor sends little more than the status line.
+local drawn = {}
+
 local function redraw()
     scrollToCursor()
     for row = 1, textRows do
         local line = lines[top + row - 1]
-        emit(string.format("\27[%d;1H", row))
-        if line then emit(display(line):sub(left, left + width - 1)) end
-        emit("\27[K")
+        local text = line and display(line):sub(left, left + width - 1) or ""
+        if drawn[row] ~= text then
+            emit(string.format("\27[%d;1H", row))
+            if text ~= "" then emit(text) end
+            emit("\27[K")
+            drawn[row] = text
+        end
     end
-    emit(string.format("\27[%d;1H\27[7m%s\27[0m", height, status():sub(1, width - 1)))
+    local bar = status():sub(1, width - 1)
+    if drawn.status ~= bar then
+        emit(string.format("\27[%d;1H\27[7m%s\27[0m", height, bar))
+        drawn.status = bar
+    end
     emit(string.format("\27[%d;%dH", cy - top + 1, cx - left + 1))
     flush()
 end
@@ -138,6 +150,7 @@ end
 -- Prompt on the status line; returns the text or nil on Esc / Ctrl+C.
 local function prompt(label, initial)
     local text = initial or ""
+    drawn.status = nil -- the prompt takes over the status line
     while true do
         emit(string.format("\27[%d;1H\27[7m%s\27[K", height,
             (" " .. label .. text):sub(1, width - 1)))

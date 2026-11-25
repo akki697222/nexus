@@ -42,59 +42,18 @@ end
 expand_properties(props)
 
 local deployToOC = false
+local deployImages = true
 for i = 1, #arg do
     if arg[i] == "oc" then
         deployToOC = true
-        break
+    elseif arg[i] == "noimage" then
+        deployImages = false
     end
 end
 
-local t = os.date("!*t")
-
-local wdays = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }
-local months = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
-
-local ftime = string.format("%s %s %02d %02d:%02d:%02d UTC %d",
-    wdays[t.wday],
-    months[t.month],
-    t.day,
-    t.hour,
-    t.min,
-    t.sec,
-    t.year
-)
-
-local source = ""
-source = source .. "-- " .. props.buildOutput .. " - built on " .. ftime .. "\n"
-source = source .. "-- Copyright (c) 2026 akki697222\n"
-source = source .. "-- Released under the MIT license\n"
-source = source .. "-- https://opensource.org/licenses/mit-license.php\n"
-for index, value in ipairs(props.includes) do
-    print("Include: " .. props.includeDir .. "/" .. value)
-    local path = props.includeDir .. "/" .. value
-    source = source .. "\n-- The source included from " .. path .. "\n"
-    local file = io.open(path, "r")
-    if not file then
-        error("Failed to open file " .. path)
-    end
-    for line in file:lines("L") do
-        if not line:match("^%-%-%-") then
-            source = source .. line
-        end
-    end
-    file:close()
-end
-
-local outputFile = props.buildDir .. "/" .. props.buildOutput
-
-local outFile = io.open(outputFile, "w+")
-if not outFile then
-    error("Failed to open output file " .. outputFile)
-end
-
-outFile:write(source)
-outFile:close()
+-- kernel: src/ joined into build/kernel.lua (tools/kbuild.lua, any OS)
+local outputFile = assert(loadfile("tools/kbuild.lua"))().build(props)
+print("Kernel: " .. outputFile)
 
 if props.minify then
     os.execute("luamin -f "..outputFile.." > .tmp && move /Y .tmp "..outputFile)
@@ -129,6 +88,14 @@ if props.overwrite then
     end
 end
 
+-- devmgr only binds drivers listed in drivers.idx
+do
+    local depmod = assert(loadfile("tools/depmod.lua"))()
+    if not depmod.run("root/usr/lib/drivers") then
+        error("depmod failed")
+    end
+end
+
 print("Deploying ./root to ../ocelot/boot...")
 local exitCode = os.execute("xcopy \".\\root\\*\" \"..\\ocelot\\boot\\\" /E /I /Y > nul")
 
@@ -137,6 +104,12 @@ if exitCode ~= 0 and exitCode ~= true then
 else
     print("Directory sync complete.")
 end
+
+-- Modes and owners of /usr (sudo is set-user-ID) as .meta files, from the
+-- rules images and the installer use (tools/nximg.lua); the kernel does not
+-- set them at boot.
+local nximg = assert(loadfile("tools/nximg.lua"))()
+print("Metadata: " .. nximg.deployMeta("root/usr", "../ocelot/boot/usr", "/usr") .. " .meta files in ../ocelot/boot/usr")
 
 -- after the sync: overwrite mode starts from an empty ../ocelot/boot, so
 -- boot/ only exists once ./root has been copied
@@ -165,6 +138,44 @@ if deployToOC then
         print("Warning: Failed to sync root to OC save directory.")
     else
         print("OC save directory sync complete.")
+        nximg.deployMeta("root/usr", ocDeploy .. "\\usr", "/usr")
+    end
+end
+
+-- Boot images for the Ocelot test disks: a zlib image (inflated by a data
+-- card, or in Lua without one) and a store image. Only /boot/nexusos and /init.lua are replaced; the
+-- rest of each disk (/etc, /home, ...) and an existing /boot/config.lua
+-- are left alone. Skip with `lua build.lua noimage`.
+local IMAGE_TARGETS = {
+    { dir = "../ocelot/nexusos-zlib", options = {} },
+    { dir = "../ocelot/nexusos-store", options = { "--store" } },
+}
+
+local function exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() return true end
+    return false
+end
+
+if deployImages then
+    for _, target in ipairs(IMAGE_TARGETS) do
+        local winDir = target.dir:gsub("/", "\\")
+        os.execute("if not exist \"" .. winDir .. "\\boot\" mkdir \"" .. winDir .. "\\boot\"")
+        local out = target.dir .. "/boot/nexusos"
+        local args = { "build", out, "--kernel", outputFile }
+        for _, o in ipairs(target.options) do args[#args + 1] = o end
+        print("Image: " .. out)
+        local ok, err = pcall(nximg.run, args)
+        if not ok then
+            error("Failed to build " .. out .. ": " .. tostring(err))
+        end
+        local copied, copyErr = copyFile("bootstrap/init.lua", target.dir .. "/init.lua")
+        if not copied then
+            print("Warning: Failed to copy init.lua to " .. target.dir .. ": " .. (copyErr or ""))
+        end
+        if not exists(target.dir .. "/boot/config.lua") then
+            copyFile("root/boot/config.lua", target.dir .. "/boot/config.lua")
+        end
     end
 end
 

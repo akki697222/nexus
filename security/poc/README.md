@@ -6,6 +6,7 @@ Nexus 上で、一般ユーザーから root に到達する経路を確認す�
 | --- | --- | --- | --- |
 | `nx17_shared_api_sudo.lua` | NX-17 | 非 root ユーザー、`/usr/bin/sudo.lua` が 4755 root | `sudo` が呼び出し元を root と誤認し、パスワードなしで payload を root 実行する |
 | `nx16_meta_setuid.lua` | NX-16 | 非 root ユーザー、書き込み可能なホーム | 再起動後の初回アクセスで、payload が `euid 0` で実行される |
+| `nx04_event_injection.lua` | NX-04 | 非 root プロセスが、root シェルが読んでいるアクティブ端末と同時に動作している | 偽のキー入力がアクティブ端末に注入され、root シェルがその行を実行する |
 
 ## 共通の前提
 
@@ -28,6 +29,7 @@ Nexus を起動せずに、2つの判断点だけを確認できます。実物�
 
 ```text
 $ lua security/poc/selftest.lua
+NX-04: a forged event from user code reaches the active terminal's reader
 NX-16: .meta line parses and 4755 selects euid 0 (rwsr-xr-x)
 NX-17: sudo executed the payload as root without a password
 all host-side checks passed
@@ -95,6 +97,43 @@ nx16-payload: /etc/shadow[1]=root:<hash>:...
 - NX-17 はホームに payload を書くため、NX-16 の偽装を壊します。両方を試す場合は、NX-17 を先に実行し、NX-16 を最後に実行してください。
 - 検証後はイメージを破棄するか、ホスト側で `nx16_payload.lua`、`nx17_payload.lua`、`.meta` を削除してください。
 
+## NX-04: イベント配送でアクティブ端末にキー入力を注入する
+
+一般ユーザー向けの `event` API に、カーネル内部に限定すべき `dispatch`・`setForeground`・`removeQueue` が残っています（`env.lua` で user 層から外しているのは `addHook`・`removeHook`・`markIdle` だけ）。`event.dispatch(ev)` は登録済みフックを全部呼び、tty ドライバーは `event.addHook(tty.signal)` で入力フックを登録しています。`tty.signal(ev)` は keyboard アドレス（`ev[2]`）を見ずに `ttys[activeId]` へそのまま流すため、非 root プロセスが偽の `text_input` と Enter を `dispatch` するだけで、アクティブ端末で入力を読んでいるプログラムの行バッファにそのまま入ります。そのプログラムが root シェルなら、注入された行が root で実行されます。
+
+### 前提と想定する攻撃
+
+- root がコンソール（アクティブ端末）でシェルを使っている。
+- 同じインスタンスで、非 root ユーザーのプロセスが同時に動いている。共有環境では別ログイン、単一コンソールでは `at`／`crontab` で仕込んだ非 root ジョブなどを使う。攻撃者が自分の前景で直接動かすと、アクティブ端末の reader が攻撃者自身になり注入先がずれるため、背景（`&`）か別プロセスから実行する。
+
+```text
+$ nx04_event_injection &
+```
+
+スクリプトは次の順に動作します。
+
+1. 実行するコマンド（`id -u > /root/nx04_proof` …）を組み立てる。`/root` は root しか書けない。
+2. `event.dispatch(table.pack("text_input", <任意>, コマンド))` でコマンド文字列を、続けて `event.dispatch(table.pack("key_down", <任意>, 13, 28))` で Enter を注入する。
+3. フック経由で `tty.signal` が走り、アクティブ端末の reader（root シェル）がその行を読む。
+4. root シェルが行を実行し、`/root/nx04_proof` を作成する。
+
+期待する出力の例:
+
+```text
+nx04: injecting a command into the active terminal
+nx04: /root/nx04_proof created:
+0
+nx04 euid=0
+nx04: if it shows euid=0, NX-04 is confirmed
+```
+
+`/root/nx04_proof` が作成され `euid=0` を示していれば、非 root プロセスから root シェルへのキー入力注入（NX-04）が成立しています。`event.removeQueue(pid)` で他プロセスのイベントキューを消せる点（入力停止による DoS）も同じ API 露出に含まれます。
+
+### 注意点
+
+- アクティブ端末の reader が root でないと昇格にはなりません（攻撃者自身の非 root シェルに注入しても害はありません）。root の reader と非 root の注入プロセスが同時に存在する状況を用意してください。
+- 検証後はイメージを破棄するか、ホスト側で `/root/nx04_proof` を削除してください。
+
 ## 失敗したときの確認点
 
 - `nx17: cannot execute sudo` または `set-user-ID privilege is unavailable`:
@@ -111,3 +150,4 @@ nx16-payload: /etc/shadow[1]=root:<hash>:...
 - 実機（OpenComputers / Ocelot）での実行結果は未確認です。
 - スクリプトは静的レビューで確認した経路を再現するもので、Nexus の修正版に対する回帰テストではありません。
 - 修正後は、`NX-16` の受け入れ条件（`.meta` を変更しても `euid 0` で起動できない）と、`NX-17` の受け入れ条件（共有 API を変更しても `sudo` の判断が変わらない）をこのスクリプトで確認できます。
+- `NX-04` の受け入れ条件（非 root プロセスが他プロセスの配送先やキューを変更できない）は、修正後に `dispatch`・`setForeground`・`removeQueue` が user 層から拒否されることで確認します。

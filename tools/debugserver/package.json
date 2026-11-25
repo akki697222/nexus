@@ -1,0 +1,9 @@
+{
+  "name": "nexus-debugserver",
+  "version": "0.1.0",
+  "description": "Receives the Nexus TCP debug console (netconsole)",
+  "license": "MIT",
+  "private": true,
+  "bin": { "nexus-debugserver": "debugserver.js" },
+  "scripts": { "start": "node debugserver.js" }
+}

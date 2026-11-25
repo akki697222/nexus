@@ -1,9 +1,13 @@
 # synapsed rules: <match>... <action>...
 #   match:  type=<component type>  label=<label>  address=<address prefix>
+#           driver=<driver name>
 #   action: mount=<absolute path>  nomount  run=<absolute path>
 # Filesystems without a matching mount/nomount rule go to /mnt/<label>.
 # A run program is started as: program add|remove <address> <type>
+# Rules with driver= run when the kernel binds/unbinds that driver, as:
+#   program add|remove <address> <type> <driver> <node>
 #
 # label=backup    mount=/backup
 # address=1a2b    nomount
 # type=modem      run=/usr/bin/netup.lua
+# driver=printer3d  run=/usr/bin/printer-hook.lua

@@ -1,0 +1,12 @@
+# Development image (config.debug = true): log in as the debug user and run
+# a few commands.
+wait "Login: " 60
+type "debug\n"
+wait "Password: "
+type "debug\n"
+wait "debug@"
+type "ls -al /\n"
+wait "usr"
+type "echo hello | tr a-z A-Z\n"
+wait "HELLO"
+screen

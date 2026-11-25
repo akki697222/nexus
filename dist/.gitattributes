@@ -1,0 +1,2 @@
+# nexus-install.lua is generated (tools/mkinstaller.lua) and served raw as is
+nexus-install.lua -text

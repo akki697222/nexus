@@ -6,7 +6,7 @@
 --
 --   lua security/poc/selftest.lua
 --
--- The NX-17 check copies the same lock() shape as src/env.lua and shows that
+-- The NX-17 check copies the same lock() shape as src/kernel/env.lua and shows that
 -- rawset() on the shared proxy changes what sudo.lua sees. The NX-16 check
 -- round-trips the .meta line format and the setuid decision in process.exec().
 
@@ -18,7 +18,7 @@ local function read(path)
 end
 
 local function check_nx16()
-    local permission = assert(load(read("src/permission.lua") .. "\nreturn permission"))()
+    local permission = assert(load(read("src/sec/permission.lua") .. "\nreturn permission"))()
 
     local function write_line(name, vtype, hash, mtime, btime, mode, refcount, uid, gid, link)
         return string.format("%s:%s:%d:%d:%d:%d:%d:%d:%d:%s",
@@ -42,7 +42,7 @@ local function check_nx16()
     assert(permission.canSetUID(parsed.mode), "4755 must set the setuid bit")
     assert(permission.canOtherExec(parsed.mode), "4755 must be executable by others")
 
-    -- src/process.lua L283-286: the setuid bit selects the file owner as euid.
+    -- src/proc/process/spawn.lua (exec): the setuid bit selects the file owner as euid.
     local euid = 100
     if permission.canSetUID(parsed.mode) then euid = parsed.uid end
     assert(euid == 0, "exec must switch euid to the forged owner")
@@ -54,7 +54,7 @@ local function check_nx17()
     local sudo_source = read("root/usr/bin/sudo.lua")
     local argparse_source = read("root/usr/lib/argparse.lua")
 
-    -- Same shape as src/env.lua lock().
+    -- Same shape as src/kernel/env.lua lock().
     local function lock(tbl, name)
         return setmetatable({}, {
             __metatable = name,
@@ -157,6 +157,66 @@ local function check_nx17()
     print("NX-17: sudo executed the payload as root without a password")
 end
 
+local function check_nx04()
+    -- src/kernel/env.lua: the user-tier `event` API is functions(event, exclude)
+    -- with exclude = { addHook, removeHook, markIdle }. dispatch, setForeground
+    -- and removeQueue are not in that set, so they are handed to unprivileged
+    -- processes.
+    local env_source = read("src/kernel/env.lua")
+    local exclude
+    for line in env_source:gmatch("[^\r\n]+") do
+        if line:find("functions(event", 1, true) then exclude = line break end
+    end
+    assert(exclude, "could not find the user-tier event line in env.lua")
+    for _, name in ipairs({ "dispatch", "setForeground", "removeQueue" }) do
+        assert(not exclude:find(name), name .. " must be withheld from the user tier but is exposed")
+    end
+
+    -- Mirror src/proc/event.lua dispatch() (every registered hook runs on the
+    -- event) and the tty input hook (tty.signal -> ttys[activeId]:signal, the
+    -- keyboard address in slot 2 ignored). A forged event from user code runs
+    -- the hook and lands tokens in the active terminal's cooked line buffer.
+    local hooks = {}
+    local function addHook(fn) hooks[#hooks + 1] = fn end
+    local function dispatch(ev)
+        if not ev or ev.n == 0 then return end
+        for _, hook in ipairs(hooks) do hook(ev) end
+    end
+
+    local active = { tokens = {}, line = nil, buffer = "" }
+    local function push(token) active.tokens[#active.tokens + 1] = token end
+    -- tty_driver:signal shape: text_input pushes its string; key_down char 13
+    -- commits the line (src/.../tty.lua keyPress/typeText).
+    local function signal(name, _addr, char)
+        if name == "text_input" then
+            push({ text = char })
+        elseif name == "key_down" and char == 13 then
+            push({ char = 13 })
+        end
+    end
+    -- tty.signal(ev): forwards ev[1..4] to the active tty, ignoring ev[2].
+    addHook(function(ev) signal(ev[1], ev[2], ev[3], ev[4]) end)
+    local function drain()
+        for _, t in ipairs(active.tokens) do
+            if t.text then
+                active.buffer = active.buffer .. t.text
+            elseif t.char == 13 then
+                active.line, active.buffer = active.buffer, ""
+            end
+        end
+    end
+
+    -- the same two events nx04_event_injection.lua dispatches
+    dispatch(table.pack("text_input", "nx04", "id -u > /root/nx04_proof"))
+    dispatch(table.pack("key_down", "nx04", 13, 28))
+    drain()
+    assert(active.line == "id -u > /root/nx04_proof",
+        "the forged line must reach the active terminal's reader")
+
+    print("NX-04: a forged event from user code reaches the active terminal's reader")
+end
+
+check_nx04()
 check_nx16()
 check_nx17()
 print("all host-side checks passed")
