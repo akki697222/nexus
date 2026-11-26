@@ -112,4 +112,79 @@ none, why = http.request("https://a.test/y", { device = "/dev/eth9" })
 assert(none == nil and why:find("No such device"))
 assert(opened == 0)
 
+------------------------------------------------------------
+-- http:// over a TCP socket of the card
+------------------------------------------------------------
+local sent, connects
+local tcpScript -- the server's answer, in the pieces the socket returns
+deviceLib.open = function(path, mode)
+    opened = opened + 1
+    return {
+        isTcpEnabled = function() return true end,
+        request = function() return nil, "the card's HTTP is not for http://" end,
+        connect = function(host, port)
+            connects[#connects + 1] = host .. ":" .. tostring(port)
+            local pieces = { table.unpack(tcpScript) }
+            local s, connected = {}, false
+            function s:finishConnect()
+                if connected then return true end
+                connected = true
+                return false
+            end
+            function s:write(data)
+                local n = math.min(#data, 10)
+                sent[#sent + 1] = data:sub(1, n)
+                return n
+            end
+            function s:read()
+                local p = table.remove(pieces, 1)
+                if p == "!" then return nil, "reset" end
+                return p
+            end
+            function s:close() end
+            return s
+        end,
+    }
+end
+
+local function tcp(answer, url, opts)
+    sent, connects, tcpScript = {}, {}, answer
+    local r, e = http.request(url, opts)
+    return r, e, table.concat(sent)
+end
+
+-- chunked, split anywhere, streamed as it arrives
+got = {}
+res, why, text = tcp({ "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Enc", "",
+    "oding: chunked\r\n\r\n5\r\nhel", "lo\r\n", "", "1", "\r\n!\r\n3\r\nab", "c\r\n0\r\n\r\n" },
+    "http://127.0.0.1:1234/v1/chat?x=1", { method = "POST", body = "{}", headers = { Accept = "a/b" },
+        onChunk = function(c) got[#got + 1] = c end })
+assert(res, why)
+assert(res.status == 200 and res.headers["content-type"] == "text/event-stream")
+assert(table.concat(got) == "hello!abc", table.concat(got, "|"))
+assert(connects[1] == "127.0.0.1:1234")
+assert(text:find("^POST /v1/chat%?x=1 HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nConnection: close\r\n"), text)
+assert(text:find("\r\nAccept: a/b\r\n", 1, true) and text:find("\r\nContent%-Length: 2\r\n\r\n{}$"), text)
+assert(opened == 0)
+
+-- Content-Length, port 80, no path
+res, why, text = tcp({ "HTTP/1.0 404 Not Found\r\nContent-Length: 4\r\n\r\nno", "pe and more" },
+    "http://a.test")
+assert(res and res.status == 404 and res.message == "Not Found" and res.body == "nope", tostring(why))
+assert(text:find("^GET / HTTP/1.1\r\nHost: a.test\r\n") and not text:find("Content-Length"), text)
+
+-- to the end of the connection; a redirect to https goes to the card's HTTP
+res = tcp({ "HTTP/1.1 200 OK\r\n\r\nab", "cd", nil }, "http://a.test/p")
+assert(res and res.body == "abcd")
+none, why = tcp({ "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab" }, "http://a.test/p")
+assert(none == nil and why:find("closed early"), tostring(why))
+none, why = tcp({ "HTTP/1.1 200 OK\r\n\r\nab", "!" }, "http://a.test/p")
+assert(none == nil and why:find("reset"))
+none, why = tcp({ "garbage\r\n\r\n" }, "http://a.test/p")
+assert(none == nil and why:find("not an HTTP response"))
+-- opts.tcp = false uses the card's HTTP
+none, why = tcp({}, "http://a.test/p", { tcp = false })
+assert(none == nil and why:find("not for http://"), tostring(why))
+assert(opened == 0)
+
 print("json/http tests passed")

@@ -6,7 +6,7 @@ local driver = {}
 driver.info = {
     match = { "internet" },
     class = "generic",
-    desc = "Internet Card (OpenComputers)",
+    desc = "Internet Card",
     node = "eth",
     mode = 660,
     group = "ethernet",
@@ -42,25 +42,6 @@ end
 function driver.ops.isHttpEnabled(inst)
     return inst.proxy.isHttpEnabled()
 end
-
---[=[
-connect(address:string[, port:number]):userdata
-Opens a new TCP connection. Returns the handle of the connection.
-
-TCP Socket Object
-
-    read([n:number]):string
-    Tries to read data from the socket stream. Returns the read byte array.
-    close()
-    Closes an open socket stream.
-    write(data:string):number
-    Tries to write data to the socket stream. Returns the number of bytes written.
-    finishConnect():boolean
-    Ensures a socket is connected. Errors if the connection failed.
-    id():string Returns the id for this socket.
-
-After calling finishConnect or read, this socket generates a signal named internet_ready whenever new data is available to be read. It has one parameter which is the socket id.
-]=]
 
 -- Calls a method of a socket or request handle of the card: those raise on
 -- network errors, which come back as nil and the message.
@@ -126,23 +107,6 @@ function driver.ops.connect(inst, addr, port)
         __close = close,
     }), nil
 end
-
---[=[
-request(url:string[, body:string[, headers:table[, method:string]]]):request
-An HTTP(S) request. Nothing blocks; poll and wait with
-event.pull(timeout, "internet_ready") in between:
-
-    request:finishConnect():boolean   true once connected, false while
-                                      connecting, nil and why on failure
-    request:response():code, message, headers
-                                      nil until the response has arrived
-    request:read([n]):string          a piece of the body; "" while none is
-                                      there yet, nil at the end (or nil and
-                                      why on failure)
-    request:close()
-
-Cards that do not follow redirects return the 3xx response as it is.
-]=]
 
 ---@param url string
 ---@param body string?

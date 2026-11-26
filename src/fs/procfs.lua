@@ -23,6 +23,35 @@ def("/meminfo", function()
     )
 end)
 
+def("/cpuinfo", function ()
+    local cpu = device.getFromType("processor") --[[@as device_manifest_cpu]]
+    if cpu then
+        return string.format(
+            [[
+processor     : 0
+vendor_id     : %s
+cpu family    : %s 
+model         : %s
+cpu MHz       : %s
+core id       : 0
+cpu cores     : 1
+fpu           : yes
+fpu_exception : yes
+desc          : %s
+component     : %s
+]],
+            cpu.vendor,
+            _VERSION,
+            cpu.product,
+            cpu.clock,
+            cpu.desc,
+            cpu.addr
+        )
+    else
+        return "Unable to get cpu information."
+    end
+end)
+
 def("/uptime", function()
     local up = computer.uptime()
     return string.format("%.2f %.2f\n", up, up * 0.9)
