@@ -9,7 +9,7 @@ local order = {}       -- load / unload calls, in order
 local files = {}       -- path -> { src, uid, mode }
 local dirAttr = {}     -- directory path -> { uid, mode }
 local idx = { version = 2, abi = 1, modules = {} }
-local DIR_ATTR = { uid = 0, mode = tonumber("755", 8) }
+local DIR_ATTR = { uid = 0, mode = 755 }
 local bound = {}       -- driver name -> bound device count
 local torn = {}        -- teardownDriver calls
 
@@ -22,7 +22,7 @@ vfs = {
     attributes = function(p)
         local f = files[p]
         if f then
-            return { uid = f.uid or 0, mode = f.mode or tonumber("644", 8), size = #f.src }
+            return { uid = f.uid or 0, mode = f.mode or 644, size = #f.src }
         end
         return dirAttr[p] or DIR_ATTR
     end,
@@ -204,7 +204,7 @@ expectErr("wrong: driver name must match file name", module.load, rightDrv, true
 def("rogue", { uid = 1000 })
 expectErr("untrusted module file", module.load, "rogue", true)
 def("gwrite", { dir = "/usr/lib/modules/system/kernel/open/" })
-dirAttr["/usr/lib/modules/system/kernel/open"] = { uid = 0, mode = tonumber("775", 8) }
+dirAttr["/usr/lib/modules/system/kernel/open"] = { uid = 0, mode = 775 }
 expectErr("untrusted module file", module.load, "gwrite", true)
 assert(not module.exists("rogue") and not module.exists("gwrite"))
 

@@ -27,8 +27,13 @@ local loaded = {}
 local index = nil
 local indexError = nil
 
--- group and other write (octal 0022): a module file must not have them
-local WRITABLE_BY_OTHERS = 18
+-- Modes are octal digits kept in a decimal number (755 = rwxr-xr-x), as in
+-- sec/permission.lua: group or other write makes a module file untrusted.
+local function writableByOthers(mode)
+    local g = math.floor(mode / 10) % 10
+    local o = mode % 10
+    return g & 2 ~= 0 or o & 2 ~= 0
+end
 
 local function isPath(s)
     return s:find("/", 1, true) ~= nil
@@ -131,7 +136,7 @@ local function metaTrusted(path)
     local attr = vfs.attributes(path)
     if not attr then return true end
     if attr.uid ~= nil and attr.uid ~= 0 then return false end
-    if type(attr.mode) == "number" and (attr.mode & WRITABLE_BY_OTHERS) ~= 0 then
+    if math.type(attr.mode) == "integer" and writableByOthers(attr.mode) then
         return false
     end
     return true
