@@ -1,20 +1,12 @@
 -- modem.lua - OpenComputers modem driver
 -- Copyright (c) 2026 akki697222
 -- SPDX-License-Identifier: MIT
-local driver = {}
+local event = require("event")
+local system = require("system")
 
----@alias driver_modem_data number|string|boolean|nil
-
----@class driver_modem_queue
----@field sender string sender address
----@field port integer received port
----@field distance integer distance from sender (blocks)
----@field data table<driver_modem_data>
-
-driver.info = {
+local driver = {
     match = { "modem", "tunnel" },
-    class = "generic",
-    desc = "Modem",
+    class = "network",
     node = "modem",
     mode = 664,
     group = "modem",
@@ -25,7 +17,17 @@ driver.info = {
         isWireless = "r",
         isTunnel = "r"
     },
+    priority = 0,
 }
+
+---@alias driver_modem_data number|string|boolean|nil
+
+---@class driver_modem_queue
+---@field sender string sender address
+---@field port integer received port
+---@field distance integer distance from sender (blocks)
+---@field data table<driver_modem_data>
+
 
 function driver.attach(dev)
     ---@class driver_modem_instance
@@ -55,7 +57,7 @@ function driver.attach(dev)
             local sender = table.remove(ev, 1)
             local port = table.remove(ev, 1)
             local distance = table.remove(ev, 1)
-            log("message from " .. sender .. " (port " .. port .. ") data: [" .. table.concat(ev, ", ") .. "]")
+            system.printk("modem: message from " .. sender .. " (port " .. port .. ") data: [" .. table.concat(ev, ", ") .. "]")
             if #inst.queue > inst.maxQueue then
                 table.remove(inst.queue, 1)
             end
@@ -118,4 +120,17 @@ function driver.ops.isTunnel(inst)
     return inst.isTunnel and not inst.wired
 end
 
-return driver
+return {
+    manifest = {
+        name = "modem",
+        desc = "Modem",
+        version = "0.1.0",
+        version_n = 1,
+        abi = 1,
+        depends = {},
+    },
+    load = function() end,
+    unload = function() end,
+    module = {},
+    driver = driver,
+}

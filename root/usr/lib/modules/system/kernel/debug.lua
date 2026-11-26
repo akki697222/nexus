@@ -62,6 +62,7 @@ return {
         name = "debug",
         desc = "console debugging aids (development builds)",
         version_n = 1,
+        abi = 1,
         version = "0.1.0-OC"
     }
 }

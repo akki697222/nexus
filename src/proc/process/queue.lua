@@ -106,6 +106,8 @@ signals = {
     SIGIO     = 29,
     SIGPWR    = 30,
     SIGSYS    = 31,
+    -- sent by devmgr when a device or driver goes away; ignored by default
+    SIGDEV    = 32,
 }
 
 ---@class process_entry

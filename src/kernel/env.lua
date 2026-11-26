@@ -99,6 +99,8 @@ local function newProcessApi(tier)
         getRunQueue = true,
         resume = true,
         dispatchWaiting = true,
+        -- SIGDEV is sent by devmgr only; a process could forge it otherwise
+        sendDevSignal = true,
         -- IO waits are for kernel modules (the tty input queue)
         blockIO = tier == "user" or nil,
         wakeIO = tier == "user" or nil,
@@ -193,32 +195,104 @@ end
 -- environments
 ------------------------------------------------------------
 
--- module(7) for processes: root may load modules from /usr/lib/modules
--- and unload them; the module objects themselves stay in the kernel.
+-- module(7) for processes: everyone may look at modules (list, info, index,
+-- resolve); root may load and unload them from /usr/lib/modules and rebuild
+-- the index. Module objects never leave the kernel: entry and get are not
+-- handed out, and index() is a copy.
 local MODULE_DIR = "/usr/lib/modules/"
 
+-- deep copy of plain data (the index and manifests hold no functions)
+local function copyData(t)
+    if type(t) ~= "table" then return t end
+    local out = {}
+    for k, v in pairs(t) do out[k] = copyData(v) end
+    return out
+end
+
 local function newModuleApi()
-    local api = functions(module, { autoload = true, load = true, unload = true, get = true })
+    local api = functions(module, {
+        autoload = true, load = true, unload = true, get = true,
+        entry = true, index = true, reindex = true,
+    })
     local function isRoot()
         local cur = process.getCurrent()
         return cur ~= nil and cur.euid == 0
     end
-    function api.load(path)
-        checkArg(1, path, "string")
+    -- the options a process may pass: only these flags, as booleans
+    local function flags(opts, keys)
+        local out = {}
+        if opts == nil then return out end
+        checkArg(2, opts, "table")
+        for _, k in ipairs(keys) do out[k] = opts[k] == true end
+        return out
+    end
+    function api.load(nameOrPath, opts)
+        checkArg(1, nameOrPath, "string")
         if not isRoot() then return nil, "Permission denied" end
-        local real = vfs.resolve(path)
-        if not real or real:sub(1, #MODULE_DIR) ~= MODULE_DIR then
-            return nil, "modules must be under " .. MODULE_DIR
+        local o = flags(opts, { "noDeps", "dryRun" })
+        local target = nameOrPath
+        if nameOrPath:find("/", 1, true) then
+            target = vfs.resolve(nameOrPath)
+            if not target or target:sub(1, #MODULE_DIR) ~= MODULE_DIR then
+                return nil, "modules must be under " .. MODULE_DIR
+            end
         end
-        local mod, e = module.load(real, true)
+        local mod, e = module.load(target, true, o)
         if not mod then return nil, e end
+        -- dryRun: the load order (array of names)
+        if o.dryRun then return true, mod end
         return true, mod.manifest.name
     end
-    function api.unload(name)
+    function api.unload(name, opts)
         checkArg(1, name, "string")
         if not isRoot() then return nil, "Permission denied" end
-        local e = module.unload(name, true)
-        if e then return nil, e end
+        local o = flags(opts, { "force", "recursive", "dryRun" })
+        local r, e = module.unload(name, true, o)
+        if not r then return nil, e end
+        -- dryRun: the unload order (array of names)
+        if o.dryRun then return true, r end
+        return true
+    end
+    -- a loaded module's record (or an index entry, state "available"),
+    -- without the module object; driver data comes from the index
+    function api.info(name)
+        checkArg(1, name, "string")
+        local ie = module.index().modules[name]
+        local e = module.entry(name)
+        local out
+        if e then
+            out = {
+                name = e.name, kind = e.kind, path = e.path, size = e.size,
+                version = e.version, version_n = e.version_n, desc = e.desc,
+                deps = e.deps, usedBy = e.usedBy, auto = e.auto,
+                state = "loaded", manifest = copyData(e.mod.manifest),
+                abi = e.mod.manifest.abi,
+            }
+        elseif ie then
+            local deps = {}
+            for i, d in ipairs(ie.depends or {}) do
+                deps[i] = type(d) == "table" and d[1] or d
+            end
+            out = {
+                name = name, kind = ie.kind, path = ie.path, size = ie.size or 0,
+                version = ie.version, version_n = ie.version_n, desc = ie.desc,
+                deps = deps, usedBy = {}, state = "available",
+                abi = ie.abi,
+            }
+        else
+            return nil, "Unknown module"
+        end
+        if ie and ie.driver then out.driver = copyData(ie.driver) end
+        if ie and ie.depends then out.depends = copyData(ie.depends) end
+        return out
+    end
+    function api.index()
+        local idx, err = module.index()
+        return copyData(idx), err
+    end
+    function api.reindex()
+        if not isRoot() then return nil, "Permission denied" end
+        module.reindex()
         return true
     end
     return api

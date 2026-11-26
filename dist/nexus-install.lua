@@ -1049,7 +1049,7 @@ total=total+section.rawSize
 end
 local transforms={
 ["etc/modules.lua"]=function(text)return install.dropLines(text,modules)end,
-["usr/lib/drivers/drivers.idx"]=function(text)return install.dropLines(text,drivers)end,
+["usr/lib/modules/modules.idx"]=function(text)return install.dropLines(text,drivers)end,
 ["etc/sudoers"]=function(text)
 if text~=""and text:sub(-1)~="\n"then text=text.."\n"end
 return text..name.." ALL=(root) ALL\n"

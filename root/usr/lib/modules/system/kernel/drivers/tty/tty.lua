@@ -926,6 +926,7 @@ return {
         name = "tty",
         desc = "tty driver",
         version_n = 2,
+        abi = 1,
         version = "0.1.1-OC"
     }
 }

@@ -6,7 +6,7 @@
 --   devctl drivers                drivers in the index
 --   devctl bind <addr> [driver]   bind a device (root)
 --   devctl unbind <addr>          unbind a device (root)
---   devctl rescan                 reload drivers.idx and probe again (root)
+--   devctl rescan                 reload modules.idx and probe again (root)
 --
 -- <addr> may be any unique prefix of a component address.
 
@@ -50,10 +50,10 @@ if command == "list" then
             .. pad(b.node and ("/dev/" .. b.node), 12) .. state)
     end
 elseif command == "drivers" then
-    print(pad("DRIVER", 14) .. pad("MATCH", 20) .. pad("USED", 6) .. "DESCRIPTION")
+    print(pad("DRIVER", 14) .. pad("MATCH", 20) .. pad("PRIORITY", 10) .. pad("CLASS", 12) .. "DESCRIPTION")
     for _, d in ipairs(device.drivers()) do
-        print(pad(d.name, 14) .. pad(table.concat(d.match, ","), 20)
-            .. pad(d.loaded and tostring(d.refs) or "-", 6) .. (d.desc or ""))
+        print(pad(d.name, 14) .. pad(table.concat(d.match or {}, ","), 20)
+            .. pad(tostring(d.priority or 0), 10) .. pad(d.class, 12) .. (d.desc or ""))
     end
 elseif command == "bind" then
     local ok, err = device.bind(resolve(args[2]), args[3])

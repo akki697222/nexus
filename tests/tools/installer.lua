@@ -110,7 +110,7 @@ local function checkInstalled(disk, user, password, left)
             assert(not disk.proxy.exists(path), path .. " belongs to a group left out")
         elseif e.kind == nximg.FS_DIR then
             assert(disk.proxy.isDirectory(path), path)
-        elseif path ~= "/etc/modules.lua" and path ~= "/usr/lib/drivers/drivers.idx" and path ~= "/etc/sudoers" then
+        elseif path ~= "/etc/modules.lua" and path ~= "/usr/lib/modules/modules.idx" and path ~= "/etc/sudoers" then
             assert(disk.get(path) == e.data, path .. " differs from the rootfs")
         end
         if not leftPaths[path] then
@@ -144,18 +144,18 @@ local function checkInstalled(disk, user, password, left)
     assert(disk.get("/home/" .. user .. "/.profile.lua"):find('os.setenv("HOME", "/home/' .. user .. '")', 1, true))
     assert((attrs(disk, "/root")) == "700")
     assert((attrs(disk, "/boot/nexusos")) == "644" and (attrs(disk, "/init.lua")) == "644")
-    -- group files left out: modules.lua and drivers.idx follow
-    local modules, idx = disk.get("/etc/modules.lua"), disk.get("/usr/lib/drivers/drivers.idx")
-    assert(modules:find("tty.lua", 1, true))
+    -- group files left out: modules.lua and modules.idx follow
+    local modules, idx = disk.get("/etc/modules.lua"), disk.get("/usr/lib/modules/modules.idx")
+    assert(modules:find('"tty"', 1, true))
     for _, g in ipairs(manifest.groups) do
         for _, p in ipairs(g.modules or {}) do
             assert((modules:find(p, 1, true) ~= nil) == not left[g.id], "modules.lua and " .. g.id)
         end
         for _, p in ipairs(g.drivers or {}) do
-            assert((idx:find('"' .. p .. '"', 1, true) ~= nil) == not left[g.id], "drivers.idx and " .. g.id)
+            assert((idx:find('"' .. p .. '"', 1, true) ~= nil) == not left[g.id], "modules.idx and " .. g.id)
         end
     end
-    assert(load(idx, "=drivers.idx", "t", {}), "drivers.idx still loads")
+    assert(load(idx, "=modules.idx", "t", {}), "modules.idx still loads")
     assert(load(modules, "=modules.lua", "t", {}), "modules.lua still loads")
 end
 

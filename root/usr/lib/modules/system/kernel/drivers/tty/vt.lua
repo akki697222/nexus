@@ -967,6 +967,7 @@ return {
         name      = "vt",
         desc      = "virtual terminal driver",
         version_n = 1,
+        abi = 1,
         version   = "0.1.0-OC"
     }
 }

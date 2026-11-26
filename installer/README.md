@@ -135,8 +135,8 @@ indentation go, line breaks stay); `--plain` builds it unminified for
 debugging.
 
 Optional groups are `installer/groups.lua` (the debug tools) and one per
-driver in `drivers.idx`; leaving one out also drops its lines from
-`/etc/modules.lua` and `drivers.idx`. After publishing a release, set its
+driver in `modules.idx`; leaving one out also drops its lines from
+`/etc/modules.lua` and `modules.idx`. After publishing a release, set its
 tag in `dist/channel.lua` on `dev-oc`; the online installer reads it from
 there (GitHub's `releases/latest` skips pre-releases).
 

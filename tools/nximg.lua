@@ -357,9 +357,9 @@ local function cmd_build(args)
         for k, v in pairs(assert(loadfile(opts.attrs))()) do attrs[k] = v end
     end
     local kernel = read_file(opts.kernel or "build/kernel.lua")
-    -- refresh the driver index the kernel's devmgr requires
+    -- refresh the module index (modules and drivers) the kernel reads
     local depmod = assert(loadfile("tools/depmod.lua"))()
-    if not depmod.run((opts.usr or "root/usr") .. "/lib/drivers", nil, true) then
+    if not depmod.run((opts.usr or "root/usr") .. "/lib/modules", nil, true) then
         error("depmod failed", 0)
     end
     local wanted = {}
@@ -514,7 +514,7 @@ end
 nximg.serialize = serialize
 
 -- Optional groups for the manifest: installer/groups.lua and one group per
--- driver of drivers.idx. Paths that are not in the rootfs are dropped, and
+-- driver of modules.idx. Paths that are not in the rootfs are dropped, and
 -- groups left without a path.
 local function manifest_groups(usr_dir, etc_dir)
     local present = {}
@@ -531,12 +531,18 @@ local function manifest_groups(usr_dir, etc_dir)
                 paths = paths, modules = g.modules }
         end
     end
-    local index = assert(loadfile(usr_dir .. "/lib/drivers/drivers.idx", "t", {}))()
-    for _, d in ipairs(index.drivers) do
+    local index = assert(loadfile(usr_dir .. "/lib/modules/modules.idx", "t", {}))()
+    local drivers = {}
+    for name, m in pairs(index.modules) do
+        if m.kind == "driver" then drivers[#drivers + 1] = name end
+    end
+    table.sort(drivers)
+    for _, name in ipairs(drivers) do
+        local d = index.modules[name]
         local path = d.path:gsub("^/", "")
         if present[path] then
-            groups[#groups + 1] = { id = "driver:" .. d.name, name = d.desc or d.name, default = true,
-                paths = { path }, drivers = { d.path }, devgroup = d.group }
+            groups[#groups + 1] = { id = "driver:" .. name, name = d.desc or name, default = true,
+                paths = { path }, drivers = { d.path }, devgroup = d.driver.group }
         end
     end
     return groups

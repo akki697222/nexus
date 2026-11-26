@@ -88,10 +88,10 @@ if props.overwrite then
     end
 end
 
--- devmgr only binds drivers listed in drivers.idx
+-- modules.idx lists the modules and drivers; devmgr binds the drivers in it
 do
     local depmod = assert(loadfile("tools/depmod.lua"))()
-    if not depmod.run("root/usr/lib/drivers") then
+    if not depmod.run("root/usr/lib/modules") then
         error("depmod failed")
     end
 end

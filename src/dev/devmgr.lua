@@ -1,21 +1,25 @@
 -- device manager
--- Binds drivers (/usr/lib/drivers/<name>.lua) to OC components as they
--- appear and disappear. Matching uses the build-time index drivers.idx
--- (tools/depmod.lua); driver code never runs just to decide a match.
+-- Binds driver modules to OC components as they appear and disappear.
+-- Candidates come from the module index (modules.idx, see tools/depmod.lua):
+-- every kind == "driver" entry whose driver.match names the component type,
+-- highest priority first. A candidate is loaded with module.load only when it
+-- is tried for a component, so a driver that matches nothing never runs.
 --
--- A driver runs in a sandbox: it sees the proxy of the device it is bound
--- to, a log function, the modules it declared in info.depends, and a few
--- harmless libraries. It cannot reach `component`, `computer` or other
--- devices.
+-- A driver is a normal kernel module. attach(dev) receives a read-only device
+-- table: dev.proxy wraps the component proxy and raises "device removed" once
+-- the binding is torn down.
 --
--- Userland reaches a bound device only through device.open(path, mode),
--- which returns a handle carrying the ops the node's permissions and the
--- driver's info.access allow.
+-- Bound drivers stay resident. A driver that was auto-loaded for an attempt
+-- and bound nothing is unloaded again at once. module.unload of a driver with
+-- bound devices is refused unless forced; a forced unload calls
+-- devmgr.teardownDriver first.
+--
+-- Userland reaches a bound device only through device.open(path, mode), which
+-- returns a handle carrying the ops that the node's permissions and the
+-- driver's access table allow.
 
 ---@class devmgr
 devmgr = {}
-
-devmgr.indexPath = "/usr/lib/drivers/drivers.idx"
 
 do
     -- Types the kernel and its modules drive themselves.
@@ -29,42 +33,39 @@ do
     }
     devmgr.coreTypes = CORE_TYPES
 
-    ---@class devmgr_entry
+    ---@class devmgr_candidate
     ---@field name string
     ---@field path string
-    ---@field match string[]
-    ---@field class? string
-    ---@field depends? string[]
     ---@field desc? string
-    ---@field node? string
-    ---@field mode? integer
-    ---@field group? string
-    ---@field access? table<string, string>
-
-    ---@type devmgr_entry[]
-    local index = {}
-    ---@type table<string, devmgr_entry> type -> first matching driver
-    local byType = {}
-    ---@type table<string, devmgr_entry>
-    local byName = {}
-
-    -- loaded driver code: name -> { drv = table, refs = integer }
-    local loaded = {}
+    ---@field meta table the driver table of the index entry
+    ---@field priority integer
 
     ---@class devmgr_binding
     ---@field address string
     ---@field type string
+    ---@field state string "bound" | "unbound" | "failed"
     ---@field driver? string
-    ---@field node? string
-    ---@field state string "bound" | "failed" | "unbound"
-    ---@field error? string
+    ---@field drv? table the driver table of the loaded module
+    ---@field meta? table
     ---@field inst? any
+    ---@field ctx? table liveness flag shared with dev.proxy
+    ---@field node? string
+    ---@field error? string
     ---@field handles? table<table, boolean>
 
-    ---@type table<string, devmgr_binding>
+    ---@type devmgr_candidate[] sorted by priority desc, then name asc
+    local index = {}
+    ---@type table<string, devmgr_candidate[]> component type -> candidates
+    local byType = {}
+    ---@type table<string, devmgr_candidate> driver name -> candidate
+    local byName = {}
+    ---@type table<string, devmgr_binding> component address -> binding
     local bindings = {}
-
+    ---@type table<string, string> node name -> address
+    local nodeOwner = {}
     local ready = false
+    local subs = {}
+    local nextToken = 0
 
     local function log(msg, level)
         printk("devmgr: " .. msg, level)
@@ -74,50 +75,6 @@ do
         return tostring(addr):sub(1, 8)
     end
 
-    ------------------------------------------------------------
-    -- index
-    ------------------------------------------------------------
-
-    local function readFile(path)
-        local f, e = vfs.open(path, "r")
-        if not f then return nil, e end
-        local data = f:readAll()
-        f:close()
-        return data
-    end
-
-    local function loadIndex()
-        index, byType, byName = {}, {}, {}
-        local data, e = readFile(devmgr.indexPath)
-        if not data then
-            return nil, e or "not found"
-        end
-        local chunk, err = load(data, "=drivers.idx", "t", {})
-        if not chunk then return nil, err end
-        local ok, idx = pcall(chunk)
-        if not ok then return nil, idx end
-        if type(idx) ~= "table" or type(idx.drivers) ~= "table" then
-            return nil, "invalid index"
-        end
-        for _, entry in ipairs(idx.drivers) do
-            if type(entry) == "table" and type(entry.name) == "string"
-                and type(entry.path) == "string" and type(entry.match) == "table" then
-                index[#index + 1] = entry
-                byName[entry.name] = entry
-                for _, t in ipairs(entry.match) do
-                    if not CORE_TYPES[t] and not byType[t] then
-                        byType[t] = entry
-                    end
-                end
-            end
-        end
-        return true
-    end
-
-    ------------------------------------------------------------
-    -- sandbox
-    ------------------------------------------------------------
-
     local function readonly(tbl, name)
         return setmetatable({}, {
             __index = tbl,
@@ -126,97 +83,93 @@ do
         })
     end
 
-    local function overlay(tbl, name)
-        return setmetatable({}, { __index = tbl, __metatable = name })
+    local function matches(list, ctype)
+        for _, t in ipairs(list or {}) do
+            if t == ctype then return true end
+        end
+        return false
     end
 
-    ---@param entry devmgr_entry
-    local function newDriverEnv(entry)
-        local declared = {}
-        for _, m in ipairs(entry.depends or {}) do declared[m] = true end
-        local name = entry.name
-        local env = {
-            assert = assert,
-            error = error,
-            ipairs = ipairs,
-            pairs = pairs,
-            next = next,
-            pcall = pcall,
-            xpcall = xpcall,
-            select = select,
-            tonumber = tonumber,
-            tostring = tostring,
-            type = type,
-            rawequal = rawequal,
-            rawget = rawget,
-            rawlen = rawlen,
-            rawset = rawset,
-            setmetatable = setmetatable,
-            getmetatable = getmetatable,
-            checkArg = checkArg,
-            string = overlay(string, "string"),
-            table = overlay(table, "table"),
-            math = overlay(math, "math"),
-            utf8 = overlay(utf8, "utf8"),
-            coroutine = overlay(coroutine, "coroutine"),
-            computer = readonly({ uptime = computer.uptime }, "computer"),
-            devfs = readonly({ exists = devfs.exists, list = devfs.list }, "devfs"),
-            event = readonly({ listen = event.listen, listenAny = event.listenAny, cancel = event.cancel }, "event")
-        }
-        function env.log(...)
-            local parts = table.pack(...)
-            for i = 1, parts.n do parts[i] = tostring(parts[i]) end
-            printk(name .. ": " .. table.concat(parts, " "))
-        end
+    ------------------------------------------------------------
+    -- index
+    ------------------------------------------------------------
 
-        function env.require(modname)
-            if not declared[modname] then
-                error("module '" .. tostring(modname) .. "' is not declared in info.depends", 2)
-            end
-            local m = module.require(modname)
-            if not m then error("module '" .. modname .. "' is not loaded", 2) end
-            return m
-        end
-
-        env._G = env
-        return env
-    end
-
-    ---@param entry devmgr_entry
-    local function acquire(entry)
-        local slot = loaded[entry.name]
-        if slot then
-            slot.refs = slot.refs + 1
-            return slot.drv
-        end
-        for _, m in ipairs(entry.depends or {}) do
-            if not module.exists(m) then
-                return nil, "required module '" .. m .. "' is not loaded"
+    -- Rebuilds the candidate lists from module.index(). Returns the number of
+    -- driver entries.
+    local function buildIndex()
+        local idx = module.index()
+        local list = {}
+        for name, entry in pairs(idx.modules) do
+            if entry.kind == "driver" and type(entry.driver) == "table" then
+                list[#list + 1] = {
+                    name = name,
+                    path = entry.path,
+                    desc = entry.desc,
+                    meta = entry.driver,
+                    priority = tonumber(entry.driver.priority) or 0,
+                }
             end
         end
-        local chunk, e = loadfile(entry.path, "t", newDriverEnv(entry))
-        if not chunk then return nil, e or "cannot load" end
-        local ok, drv = xpcall(chunk, debug.traceback)
-        if not ok then return nil, drv end
-        if type(drv) ~= "table" or type(drv.attach) ~= "function" then
-            return nil, "not a driver (attach missing)"
+        table.sort(list, function(a, b)
+            if a.priority ~= b.priority then return a.priority > b.priority end
+            return a.name < b.name
+        end)
+        byType, byName = {}, {}
+        for _, cand in ipairs(list) do
+            byName[cand.name] = cand
+            for _, t in ipairs(cand.meta.match or {}) do
+                if not CORE_TYPES[t] then
+                    local l = byType[t]
+                    if not l then
+                        l = {}
+                        byType[t] = l
+                    end
+                    l[#l + 1] = cand
+                end
+            end
         end
-        loaded[entry.name] = { drv = drv, refs = 1 }
-        return drv
+        index = list
+        return #list
     end
 
-    local function releaseCode(name)
-        local slot = loaded[name]
-        if not slot then return end
-        slot.refs = slot.refs - 1
-        if slot.refs <= 0 then loaded[name] = nil end
+    ------------------------------------------------------------
+    -- bindings and subscribers
+    ------------------------------------------------------------
+
+    local function record(address, ctype)
+        local b = bindings[address]
+        if not b then
+            b = { address = address, type = ctype, state = "unbound" }
+            bindings[address] = b
+        end
+        b.type = ctype
+        return b
+    end
+
+    local function boundCount(name)
+        local n = 0
+        for _, b in pairs(bindings) do
+            if b.state == "bound" and b.driver == name then n = n + 1 end
+        end
+        return n
+    end
+
+    local function notify(event, info)
+        local tokens = {}
+        for token in pairs(subs) do tokens[#tokens + 1] = token end
+        table.sort(tokens)
+        for _, token in ipairs(tokens) do
+            local fn = subs[token]
+            if fn then
+                local ok, e = pcall(fn, event, info)
+                if not ok then log("subscriber failed: " .. tostring(e), "err") end
+            end
+        end
     end
 
     ------------------------------------------------------------
     -- nodes
     ------------------------------------------------------------
-
-    local nodeOwner = {} -- node name -> address
 
     -- System groups for driver-declared node groups take the lowest free gid
     -- in 100..999.
@@ -235,25 +188,25 @@ do
         end
     end
 
-    local function allocNode(prefix, address, entry)
-        local mode = tonumber(entry.mode) or 600
+    local function allocNode(prefix, address, meta, name)
+        local mode = tonumber(meta.mode) or 600
         local gid = 0
-        if entry.group then
-            local g = group.getGroup(entry.group) or createGroup(entry.group)
+        if meta.group then
+            local g = group.getGroup(meta.group) or createGroup(meta.group)
             if g then
                 gid = g.gid
             else
-                log("cannot create group '" .. entry.group .. "' for " .. entry.name .. ", using root", "warning")
+                log("cannot create group '" .. meta.group .. "' for " .. name .. ", using root", "warning")
             end
         end
         for i = 0, 255 do
-            local name = prefix .. i
-            if not nodeOwner[name] and not devfs.exists(name) then
-                local ok, _, vnode = devfs.create(name, {}, false, mode)
+            local nodeName = prefix .. i
+            if not nodeOwner[nodeName] and not devfs.exists(nodeName) then
+                local ok, _, vnode = devfs.create(nodeName, {}, false, mode)
                 if ok then
                     if vnode then vnode.gid = gid end
-                    nodeOwner[name] = address
-                    return name
+                    nodeOwner[nodeName] = address
+                    return nodeName
                 end
             end
         end
@@ -267,87 +220,179 @@ do
     end
 
     ------------------------------------------------------------
-    -- bind / unbind
+    -- attach / teardown
     ------------------------------------------------------------
 
-    local function revokeHandles(b)
-        if b.handles then
-            for h in pairs(b.handles) do h.valid = false end
-        end
-        b.handles = nil
-    end
-
-    ---@param b devmgr_binding
-    ---@param state string
-    ---@param reason? string
-    local function teardown(b, state, reason)
-        revokeHandles(b)
-        local slot = b.driver and loaded[b.driver]
-        if slot and slot.drv.detach and b.inst ~= nil then
-            local ok, e = xpcall(slot.drv.detach, debug.traceback, b.inst)
-            if not ok then log(b.driver .. ": detach failed: " .. tostring(e), "err") end
-        end
-        freeNode(b.node)
-        local wasBound = b.state == "bound"
-        if b.driver and wasBound then releaseCode(b.driver) end
-        local node, driverName = b.node, b.driver
-        b.inst, b.node = nil, nil
-        b.state, b.error = state, reason
-        if wasBound then
-            computer.pushSignal("device_detached", b.address, b.type, driverName, node)
-        end
-    end
-
-    ---@param address string
-    ---@param ctype string
-    ---@param entry devmgr_entry
-    local function bindTo(address, ctype, entry)
-        local b = bindings[address]
-        if not b then
-            b = { address = address, type = ctype, state = "unbound" }
-            bindings[address] = b
-        end
-        b.driver = entry.name
-        local drv, e = acquire(entry)
-        if not drv then
-            b.state, b.error = "failed", e
-            log(entry.name .. ": cannot load for " .. short(address) .. ": " .. tostring(e), "err")
-            return nil, e
-        end
-        local proxy = component.proxy(address)
-        local dev = {
+    -- The dev table handed to probe and attach. dev.proxy raises once ctx
+    -- is no longer alive.
+    local function makeDev(address, ctype, ctx)
+        local raw = component.proxy(address)
+        local proxy = setmetatable({}, {
+            __index = function(_, k)
+                local v = raw[k]
+                if type(v) ~= "function" then return v end
+                return function(...)
+                    if not ctx.alive then error("device removed", 2) end
+                    return v(...)
+                end
+            end,
+            __newindex = function() error("device proxy is read-only", 2) end,
+            __metatable = "device proxy",
+        })
+        return readonly({
             address = address,
             type = ctype,
+            slot = component.slot(address),
+            name = ctype,
             proxy = proxy,
-        }
-        function dev.emit(name, ...)
-            checkArg(1, name, "string")
-            computer.pushSignal(name, address, ...)
-        end
+            pushSignal = function(sig, ...)
+                checkArg(1, sig, "string")
+                if not ctx.alive then error("device removed", 2) end
+                computer.pushSignal(sig, address, ...)
+            end,
+        }, "device")
+    end
 
-        dev = readonly(dev, "device")
-        local ok, inst = xpcall(drv.attach, debug.traceback, dev)
-        if not ok or inst == nil then
-            releaseCode(entry.name)
-            b.state = "failed"
-            b.error = ok and "attach returned nil" or tostring(inst)
-            log(entry.name .. ": attach failed for " .. short(address) .. ": " .. b.error, "warning")
-            return nil, b.error
-        end
-        b.inst = inst
-        b.state, b.error = "bound", nil
-        b.handles = {}
-        if entry.node then
-            b.node = allocNode(entry.node, address, entry)
-            if not b.node then
-                log(entry.name .. ": no free /dev/" .. entry.node .. "N node")
+    -- Tears a bound device down. reason is "removed", "unload" or "failed".
+    -- Handles die, detach runs, /dev node goes, every process holding a handle
+    -- gets SIGDEV once, and device_detached is pushed.
+    ---@param b devmgr_binding
+    ---@param reason string
+    ---@param err? string
+    local function teardown(b, reason, err)
+        local ctx, drv, inst = b.ctx, b.drv, b.inst
+        local node, driverName, ctype, address = b.node, b.driver, b.type, b.address
+        if ctx then ctx.alive = false end
+
+        local holders, seen = {}, {}
+        for st in pairs(b.handles or {}) do
+            st.valid = false
+            if not seen[st.pid] then
+                seen[st.pid] = true
+                holders[#holders + 1] = st.pid
             end
         end
-        log(entry.name .. " bound to " .. short(address)
-            .. (b.node and (" as /dev/" .. b.node) or ""))
-        computer.pushSignal("device_attached", address, ctype, entry.name, b.node)
+        table.sort(holders)
+        b.handles = nil
+
+        if drv and drv.detach and inst ~= nil then
+            local ok, e = xpcall(drv.detach, debug.traceback, inst)
+            if not ok then log(driverName .. ": detach failed: " .. tostring(e), "err") end
+        end
+        freeNode(node)
+
+        for _, pid in ipairs(holders) do
+            local paths = {}
+            if node then paths[1] = "/dev/" .. node end
+            process.sendDevSignal(pid, reason, paths)
+        end
+
+        b.inst, b.drv, b.meta, b.ctx, b.node = nil, nil, nil, nil, nil
+        b.state = reason == "failed" and "failed" or "unbound"
+        b.error = err
+        if reason ~= "failed" then b.driver = nil end
+        computer.pushSignal("device_detached", address, ctype, driverName, node, reason)
+        notify("detach", { address = address, type = ctype, driver = driverName, node = node, reason = reason })
+    end
+
+    -- A driver raised while bound (ops or a probe); the device is cut off.
+    local function fail(b, reason)
+        if b.state ~= "bound" then return end
+        log((b.driver or "?") .. ": " .. short(b.address) .. " failed: " .. tostring(reason), "err")
+        teardown(b, "failed", tostring(reason))
+    end
+
+    -- Probes and attaches with one loaded candidate. Returns true when bound,
+    -- nil when refused (probe false, attach nil), or nil plus an error text
+    -- when a driver raised.
+    local function bindOne(address, ctype, cand, drv)
+        if type(drv) ~= "table" or type(drv.attach) ~= "function" then
+            return nil, cand.name .. ": not a driver (attach missing)"
+        end
+        local ctx = { alive = true }
+        local dev = makeDev(address, ctype, ctx)
+
+        if drv.probe ~= nil then
+            local ok, res = xpcall(drv.probe, debug.traceback, dev)
+            if not ok then
+                ctx.alive = false
+                log(cand.name .. ": probe failed for " .. short(address) .. ": " .. tostring(res), "err")
+                return nil, "probe failed: " .. tostring(res)
+            end
+            if res == false then
+                ctx.alive = false
+                return nil
+            end
+        end
+
+        local ok, inst = xpcall(drv.attach, debug.traceback, dev)
+        if not ok then
+            ctx.alive = false
+            log(cand.name .. ": attach failed for " .. short(address) .. ": " .. tostring(inst), "err")
+            return nil, "attach failed: " .. tostring(inst)
+        end
+        if inst == nil then
+            ctx.alive = false
+            return nil
+        end
+
+        local b = record(address, ctype)
+        b.state, b.error = "bound", nil
+        b.driver, b.drv, b.meta, b.inst, b.ctx = cand.name, drv, cand.meta, inst, ctx
+        b.handles = {}
+        b.node = nil
+        if cand.meta.node then
+            b.node = allocNode(cand.meta.node, address, cand.meta, cand.name)
+            if not b.node then
+                log(cand.name .. ": no free /dev/" .. cand.meta.node .. "N node")
+            end
+        end
+        log(cand.name .. " bound to " .. short(address) .. (b.node and (" as /dev/" .. b.node) or ""))
+        computer.pushSignal("device_attached", address, ctype, cand.name, b.node)
+        notify("attach", { address = address, type = ctype, driver = cand.name, node = b.node })
         return true
     end
+
+    -- Unloads a driver that was loaded for an attempt and bound nothing.
+    local function unloadIfUnused(name)
+        if boundCount(name) > 0 then return end
+        local ok, err = module.unload(name, true)
+        if not ok and not (type(err) == "string" and err:find("^in use by ")) then
+            panic("devmgr: cannot unload " .. name .. ": " .. tostring(err))
+        end
+    end
+
+    -- Tries candidates in order. Returns true on the first bind, otherwise
+    -- nil plus the last error text (nil when every candidate just refused).
+    local function attemptList(address, ctype, list)
+        local lastErr
+        for _, cand in ipairs(list) do
+            local wasLoaded = module.get(cand.name) ~= nil
+            local mod, err = module.load(cand.name, true, { auto = true })
+            if not mod then
+                log(cand.name .. ": cannot load: " .. tostring(err), "err")
+                lastErr = tostring(err)
+            else
+                local ok, bindErr = bindOne(address, ctype, cand, mod.driver)
+                if ok then return true end
+                if bindErr then lastErr = bindErr end
+                if not wasLoaded then unloadIfUnused(cand.name) end
+            end
+        end
+        return nil, lastErr
+    end
+
+    local function tryBind(address, ctype, list)
+        local ok, err = attemptList(address, ctype, list)
+        if ok then return true end
+        local rec = record(address, ctype)
+        rec.state, rec.error = err and "failed" or "unbound", err
+        return nil, err or "no driver"
+    end
+
+    ------------------------------------------------------------
+    -- hotplug and admin API
+    ------------------------------------------------------------
 
     -- Called when a component appears (or at coldplug).
     ---@param address string
@@ -356,12 +401,13 @@ do
         if CORE_TYPES[ctype] then return nil, "core type" end
         local b = bindings[address]
         if b and b.state == "bound" then return true end
-        local entry = byType[ctype]
-        if not entry then
-            bindings[address] = { address = address, type = ctype, state = "unbound" }
+        local list = byType[ctype] or {}
+        if #list == 0 then
+            local rec = record(address, ctype)
+            rec.state, rec.error = "unbound", nil
             return nil, "no driver"
         end
-        return bindTo(address, ctype, entry)
+        return tryBind(address, ctype, list)
     end
 
     -- Called when a component disappears.
@@ -370,28 +416,17 @@ do
         local b = bindings[address]
         if not b then return end
         if b.state == "bound" then
-            teardown(b, "unbound")
             log((b.driver or "?") .. " released " .. short(address))
+            teardown(b, "removed")
         end
         bindings[address] = nil
     end
 
-    -- Detach after a driver error; the component stays known as failed.
-    local function fail(b, reason)
-        if b.state ~= "bound" then return end
-        log((b.driver or "?") .. ": " .. short(b.address) .. " failed: " .. tostring(reason), "err")
-        teardown(b, "failed", tostring(reason))
-    end
-
     function devmgr.init()
-        local ok, e = loadIndex()
-        if not ok then
-            log("no driver index (" .. tostring(e) .. "); automatic driver loading disabled", "warning")
-        else
-            log(#index .. " driver(s) indexed")
-        end
+        local n = buildIndex()
+        log(n .. " driver(s) indexed")
         ready = true
-        return ok, e
+        return true
     end
 
     function devmgr.coldplug()
@@ -413,43 +448,81 @@ do
         end
     end
 
-    -- Manual control (devctl). Kernel callers only; userland gets root-checked
-    -- wrappers.
+    -- Manual control (devctl). With driverName only that driver is tried.
     ---@param address string
     ---@param driverName? string
     function devmgr.bind(address, driverName)
         local b = bindings[address]
+        if b and b.state == "bound" then return nil, "already bound" end
         local ctype = b and b.type or component.type(address)
         if not ctype then return nil, "no such device" end
         if CORE_TYPES[ctype] then return nil, "core device" end
-        if b and b.state == "bound" then return nil, "already bound" end
-        local entry
+        local list
         if driverName then
-            entry = byName[driverName]
-            if not entry then return nil, "no such driver" end
-            local matches = false
-            for _, t in ipairs(entry.match) do if t == ctype then matches = true end end
-            if not matches then return nil, "driver does not match " .. ctype end
+            local cand = byName[driverName]
+            if not cand then return nil, "no such driver" end
+            if not matches(cand.meta.match, ctype) then
+                return nil, "driver does not match " .. ctype
+            end
+            list = { cand }
         else
-            entry = byType[ctype]
-            if not entry then return nil, "no driver" end
+            list = byType[ctype] or {}
+            if #list == 0 then return nil, "no driver" end
         end
-        return bindTo(address, ctype, entry)
+        return tryBind(address, ctype, list)
     end
 
     function devmgr.unbind(address)
         local b = bindings[address]
         if not b or b.state ~= "bound" then return nil, "not bound" end
-        teardown(b, "unbound")
         log((b.driver or "?") .. " unbound from " .. short(address))
+        teardown(b, "removed")
         return true
     end
 
+    -- Reloads the index and coldplugs every component that is not bound.
     function devmgr.rescan()
-        local ok, e = loadIndex()
-        if not ok then return nil, e end
+        module.reindex()
+        buildIndex()
         devmgr.coldplug()
         return true
+    end
+
+    -- Force-unload support: tears down every device bound to a driver.
+    -- Returns the number of bindings torn down.
+    ---@param name string
+    ---@param reason string "unload" | "removed" | "failed"
+    function devmgr.teardownDriver(name, reason)
+        checkArg(1, name, "string")
+        if reason ~= "unload" and reason ~= "removed" and reason ~= "failed" then
+            return nil, "bad reason"
+        end
+        local victims = {}
+        for _, b in pairs(bindings) do
+            if b.state == "bound" and b.driver == name then victims[#victims + 1] = b end
+        end
+        for _, b in ipairs(victims) do teardown(b, reason) end
+        return #victims
+    end
+
+    -- Number of devices bound to a driver.
+    function devmgr.boundCount(name)
+        return boundCount(name)
+    end
+
+    -- Subscribers get ("attach", info) and ("detach", info) synchronously;
+    -- info carries address, type, driver, node (and reason on detach).
+    ---@param fn fun(event: string, info: table)
+    ---@return integer token
+    function devmgr.subscribe(fn)
+        checkArg(1, fn, "function")
+        nextToken = nextToken + 1
+        subs[nextToken] = fn
+        return nextToken
+    end
+
+    function devmgr.unsubscribe(token)
+        subs[token] = nil
     end
 
     ---@return table[]
@@ -469,18 +542,25 @@ do
         return out
     end
 
+    -- One entry per driver in the index.
     ---@return table[]
     function devmgr.drivers()
         local out = {}
-        for _, e in ipairs(index) do
-            local slot = loaded[e.name]
+        for _, cand in ipairs(index) do
+            local meta = cand.meta
             out[#out + 1] = {
-                name = e.name,
-                match = util.copyTable(e.match),
-                class = e.class,
-                desc = e.desc,
-                loaded = slot ~= nil,
-                refs = slot and slot.refs or 0,
+                name = cand.name,
+                path = cand.path,
+                desc = cand.desc,
+                match = util.copyTable(meta.match or {}),
+                priority = cand.priority,
+                class = meta.class,
+                node = meta.node,
+                mode = meta.mode,
+                group = meta.group,
+                access = util.copyTable(meta.access or {}),
+                loaded = module.get(cand.name) ~= nil,
+                bound = boundCount(cand.name),
             }
         end
         return out
@@ -490,7 +570,7 @@ do
     -- userland administration (devctl)
     ------------------------------------------------------------
 
-    local function isRoot()
+    local function callerIsRoot()
         local cur = process.getCurrent()
         return cur == nil or (cur.euid or cur.uid) == 0
     end
@@ -502,18 +582,18 @@ do
 
     function device.bind(address, driverName)
         checkArg(1, address, "string")
-        if not isRoot() then return nil, "Permission denied" end
+        if not callerIsRoot() then return nil, "Permission denied" end
         return devmgr.bind(address, driverName)
     end
 
     function device.unbind(address)
         checkArg(1, address, "string")
-        if not isRoot() then return nil, "Permission denied" end
+        if not callerIsRoot() then return nil, "Permission denied" end
         return devmgr.unbind(address)
     end
 
     function device.rescan()
-        if not isRoot() then return nil, "Permission denied" end
+        if not callerIsRoot() then return nil, "Permission denied" end
         return devmgr.rescan()
     end
 
@@ -521,7 +601,7 @@ do
     -- userland handles: device.open / device.close
     ------------------------------------------------------------
 
-    -- process pid -> set of handles
+    -- process pid -> handle -> state
     local owned = {}
 
     local function nodeVNode(name)
@@ -577,17 +657,17 @@ do
         if (wantR and not allowed(vnode, proc, "r")) or (wantW and not allowed(vnode, proc, "w")) then
             return nil, "Permission denied"
         end
-        local entry = byName[b.driver]
-        local slot = loaded[b.driver]
-        if not entry or not slot then return nil, "No such device" end
-        local isRoot = (proc.euid or proc.uid) == 0
+        local root = (proc.euid or proc.uid) == 0
         local state = { valid = true, binding = b, pid = proc.pid }
         local ops = {}
-        local impl = slot.drv.ops or {}
-        for op, need in pairs(entry.access or {}) do
+        local impl = b.drv.ops or {}
+        for op, need in pairs(b.meta.access or {}) do
             local f = impl[op]
-            local permitted = (need == "r" and wantR) or (need == "w" and wantW) or (need == "root" and isRoot) or
-                (need == "rw" and wantR and wantW)
+            local permitted = need == "open"
+                or (need == "r" and wantR)
+                or (need == "w" and wantW)
+                or (need == "root" and root)
+                or (need == "rw" and wantR and wantW)
             if type(f) == "function" and permitted then
                 ops[op] = function(...)
                     if not state.valid then return nil, "device removed" end

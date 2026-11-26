@@ -1,8 +1,6 @@
 -- internet driver: HTTP requests and TCP sockets through the card, as
 -- devmgr loads it (no component, computer or event in its environment).
 -- Run from the Nexus directory: lua tests/drivers/internet.lua
-local depmod = assert(loadfile("tools/depmod.lua"))()
-
 local function read(path)
     local f = assert(io.open(path, "r"))
     local s = f:read("a")
@@ -10,11 +8,7 @@ local function read(path)
     return s
 end
 
-local source = read("root/usr/lib/drivers/internet.lua")
-local text, warn, errors = depmod.generate({ { name = "internet", source = source } })
-assert(#errors == 0 and #warn == 0, table.concat(errors, "\n") .. table.concat(warn, "\n"))
-local entry = assert(load(text, "=idx", "t", {}))().drivers[1]
-assert(entry.node == "eth" and entry.group == "ethernet" and entry.access.request == "rw")
+local source = read("root/usr/lib/modules/system/kernel/drivers/network/internet.drv.lua")
 
 local env = {
     ipairs = ipairs, pairs = pairs, type = type, tostring = tostring, tonumber = tonumber,
@@ -23,10 +17,14 @@ local env = {
         for _, t in ipairs({ ... }) do if type(v) == t then return end end
         error("bad argument", 2)
     end,
-    string = string, table = table, math = math, log = function() end,
+    string = string, table = table, math = math,
 }
-local drv = assert(load(source, "=internet.lua", "t", env))()
-for op in pairs(drv.info.access) do
+local mod = assert(load(source, "=internet.drv.lua", "t", env))()
+local drv = mod.driver
+assert(mod.manifest.name == "internet" and mod.manifest.abi == 1 and mod.manifest.version_n == 1)
+assert(type(mod.load) == "function" and type(mod.unload) == "function")
+assert(drv.node == "eth" and drv.group == "ethernet" and drv.access.request == "rw" and drv.priority == 0)
+for op in pairs(drv.access) do
     assert(type(drv.ops[op]) == "function", "missing op " .. op)
 end
 

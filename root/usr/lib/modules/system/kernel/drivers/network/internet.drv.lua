@@ -1,12 +1,9 @@
 -- internet.lua - OpenComputers Internet card driver
 -- Copyright (c) 2026 akki697222
 -- SPDX-License-Identifier: MIT
-local driver = {}
-
-driver.info = {
+local driver = {
     match = { "internet" },
-    class = "generic",
-    desc = "Internet Card",
+    class = "network",
     node = "eth",
     mode = 660,
     group = "ethernet",
@@ -16,7 +13,9 @@ driver.info = {
         connect = "rw",
         request = "rw"
     },
+    priority = 0,
 }
+
 
 function driver.attach(dev)
     ---@class driver_internet_instance
@@ -175,4 +174,17 @@ function driver.ops.request(inst, url, body, headers, method)
     }), nil
 end
 
-return driver
+return {
+    manifest = {
+        name = "internet",
+        desc = "Internet Card",
+        version = "0.1.0",
+        version_n = 1,
+        abi = 1,
+        depends = {},
+    },
+    load = function() end,
+    unload = function() end,
+    module = {},
+    driver = driver,
+}

@@ -1,7 +1,5 @@
 -- printer3d sample driver and print3d command.
 -- Run from the Nexus directory: lua tests/drivers/printer3d.lua
-local depmod = assert(loadfile("tools/depmod.lua"))()
-
 local function read(path)
     local f = assert(io.open(path, "r"))
     local s = f:read("a")
@@ -9,16 +7,7 @@ local function read(path)
     return s
 end
 
-local source = read("root/usr/lib/drivers/printer3d.lua")
-
--- the index entry is valid and warning-free
-local text, warn, errors = depmod.generate({ { name = "printer3d", source = source } })
-assert(#errors == 0, table.concat(errors, "\n"))
-assert(#warn == 0, table.concat(warn, "\n"))
-local idx = assert(load(text, "=idx", "t", {}))()
-local entry = idx.drivers[1]
-assert(entry.node == "printer" and entry.mode == 660 and entry.group == "lp")
-assert(entry.access.print == "w" and entry.access.status == "r")
+local source = read("root/usr/lib/modules/system/kernel/drivers/generic/printer3d.drv.lua")
 
 -- load the driver as devmgr does (no component/computer in its env)
 local logs = {}
@@ -26,12 +15,18 @@ local env = {
     ipairs = ipairs, pairs = pairs, type = type, tostring = tostring, tonumber = tonumber,
     error = error, pcall = pcall, select = select, setmetatable = setmetatable,
     string = string, table = table, math = math,
-    log = function(msg) logs[#logs + 1] = msg end,
+    require = function(name)
+        assert(name == "system", name)
+        return { printk = function(msg) logs[#logs + 1] = msg end }
+    end,
 }
-local drv = assert(load(source, "=printer3d.lua", "t", env))()
+local mod = assert(load(source, "=printer3d.drv.lua", "t", env))()
+local drv = mod.driver
+assert(mod.manifest.name == "printer3d" and drv.node == "printer" and drv.mode == 660 and drv.group == "lp" and drv.priority == 0)
+assert(drv.access.print == "w" and drv.access.status == "r")
 
 -- every op in info.access is implemented
-for op in pairs(drv.info.access) do
+for op in pairs(drv.access) do
     assert(type(drv.ops[op]) == "function", "missing op " .. op)
 end
 

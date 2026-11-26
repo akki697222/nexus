@@ -14,6 +14,29 @@ local dequeue_entry = proci.dequeue_entry
 local dequeue_process = proci.dequeue_process
 local enqueue_run = proci.enqueue_run
 local sig_impl = proci.sig_impl
+local SIGDEV = signals.SIGDEV
+
+-- SIGDEV is ignored by default (spawn.lua has the table; this is the one entry for it)
+sig_impl.DEFAULT[SIGDEV] = "ign"
+
+-- A SIGDEV handler set by a program is wrapped so that it is called as
+-- handler(sig, reason, paths): the wrapper pops the event sendDevSignal
+-- queued for this delivery. devUser maps a wrapper to the program's handler,
+-- devEvents to the wrapper's queue.
+local devUser = setmetatable({}, { __mode = "k" })
+local devEvents = setmetatable({}, { __mode = "k" })
+
+local function devWrapper(handler)
+    local events = {}
+    local wrapper = function(sig)
+        local ev = table.remove(events, 1)
+        if ev then return handler(sig, ev.reason, ev.paths) end
+        return handler(sig)
+    end
+    devUser[wrapper] = handler
+    devEvents[wrapper] = events
+    return wrapper
+end
 
 local function resolve_process_waiters(target)
     local to_wake = {}
@@ -170,7 +193,7 @@ function sig_impl.deliver(proc, sig)
 end
 
 function sig_impl.valid_signal(sig)
-    return math.type(sig) == "integer" and sig >= 1 and sig <= 31
+    return math.type(sig) == "integer" and sig >= 1 and sig <= 32
 end
 
 -- kill(2): `pid` > 0 is one process, `pid` < 0 the process group -pid.
@@ -214,9 +237,31 @@ function process.signal(sig, handler)
     if handler ~= nil and handler ~= "ignore" and type(handler) ~= "function" then
         return nil, "Invalid handler"
     end
+    if sig == SIGDEV and type(handler) == "function" then
+        handler = devWrapper(handler)
+    end
     local previous = proc.sig_handlers[sig] or "default"
+    previous = devUser[previous] or previous
     proc.sig_handlers[sig] = handler
     return previous
+end
+
+-- Device-removal notice for devmgr: SIGDEV to `pid` with `reason`
+-- ("removed", "unload" or "failed") and `paths` (the /dev nodes gone). The
+-- handler gets handler(SIGDEV, reason, paths). One call is one event.
+---@param pid integer
+---@param reason string
+---@param paths string[]
+function process.sendDevSignal(pid, reason, paths)
+    local proc = process.get(pid)
+    if not proc then return false, "No such process" end
+    local disposition = proc.sig_handlers[SIGDEV]
+    if type(disposition) == "function" then
+        local events = devEvents[disposition]
+        if events then events[#events + 1] = { reason = reason, paths = paths } end
+    end
+    sig_impl.deliver(proc, SIGDEV)
+    return true
 end
 
 -- setpgid(2): `pid` 0 is the caller, `pgid` 0 makes the target a group

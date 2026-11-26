@@ -12,12 +12,11 @@
 -- The raw component methods are exposed one to one, plus print(model,
 -- count), which loads a whole .3dm model and starts the job.
 
-local driver = {}
+local system = require("system")
 
-driver.info = {
+local driver = {
     match = { "printer3d" },
     class = "generic",
-    desc = "3D printer",
     node = "printer",
     mode = 660,
     group = "lp",
@@ -32,11 +31,13 @@ driver.info = {
         setRedstoneEmitter = "w", setLightLevel = "w", setCollidable = "w",
         addShape = "w", commit = "w", print = "w",
     },
+    priority = 0,
 }
+
 
 function driver.attach(dev)
     local inst = { dev = dev, proxy = dev.proxy, jobs = 0 }
-    log("printer " .. dev.address:sub(1, 8) .. " ready, max "
+    system.printk("printer3d: printer " .. dev.address:sub(1, 8) .. " ready, max "
         .. tostring(dev.proxy.getMaxShapeCount()) .. " shapes")
     return inst
 end
@@ -123,4 +124,17 @@ function driver.ops.print(inst, model, count)
     return startJob(inst, count)
 end
 
-return driver
+return {
+    manifest = {
+        name = "printer3d",
+        desc = "3D printer",
+        version = "0.1.0",
+        version_n = 1,
+        abi = 1,
+        depends = {},
+    },
+    load = function() end,
+    unload = function() end,
+    module = {},
+    driver = driver,
+}

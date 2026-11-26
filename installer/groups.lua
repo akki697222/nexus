@@ -4,9 +4,9 @@
 -- rootfs belongs to the base system unless a group below lists it; paths
 -- are relative to / (usr/..., etc/...). A group whose files are all
 -- missing (release branches drop the debug files) is left out.
--- Each driver in usr/lib/drivers becomes a group "driver:<name>" of its own.
+-- Each driver in usr/lib/modules/modules.idx becomes a group "driver:<name>" of its own.
 --
---   modules: kernel modules of the group, as listed in /etc/modules.lua
+--   modules: kernel module names of the group, as listed in /etc/modules.lua
 --   default: selected unless the user deselects it
 return {
     {
@@ -20,6 +20,6 @@ return {
             "etc/init.d/debug-account",
             "etc/runlevels/default/debug-account",
         },
-        modules = { "/usr/lib/modules/system/kernel/debug.lua" },
+        modules = { "debug" },
     },
 }

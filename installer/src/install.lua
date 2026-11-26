@@ -30,7 +30,7 @@ function install.spaceNeeded(m, plan)
 end
 
 -- What the deselected groups leave out: paths relative to / (usr/...),
--- kernel modules (/etc/modules.lua) and drivers (drivers.idx).
+-- kernel modules (/etc/modules.lua) and drivers (modules.idx).
 local function excluded(m, plan)
     local paths, modules, drivers = {}, {}, {}
     for _, g in ipairs(m.groups) do
@@ -44,7 +44,7 @@ local function excluded(m, plan)
 end
 
 -- Drops the lines that name one of the paths in quotes. /etc/modules.lua
--- lists one module a line and tools/depmod.lua writes one driver a line.
+-- lists one module a line and depmod writes one index entry per line.
 function install.dropLines(text, paths)
     if #paths == 0 then return text end
     local out = {}
@@ -120,7 +120,7 @@ function install.run(ctx)
     end
     local transforms = {
         ["etc/modules.lua"] = function(text) return install.dropLines(text, modules) end,
-        ["usr/lib/drivers/drivers.idx"] = function(text) return install.dropLines(text, drivers) end,
+        ["usr/lib/modules/modules.idx"] = function(text) return install.dropLines(text, drivers) end,
         ["etc/sudoers"] = function(text)
             if text ~= "" and text:sub(-1) ~= "\n" then text = text .. "\n" end
             return text .. name .. " ALL=(root) ALL\n"
